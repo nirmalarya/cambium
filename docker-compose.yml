@@ -1,0 +1,22 @@
+name: cambium
+# Local or private hosting. The port binds to loopback; put your
+# reverse proxy (TLS) in front of it. Never publish it on a public interface.
+services:
+  cmbd:
+    build: .
+    image: cambium:local
+    ports: ["127.0.0.1:7878:7878"]
+    volumes: ["cambium-data:/data"]
+    restart: unless-stopped
+    environment:
+      CAMBIUM_RATE: "${CAMBIUM_RATE:-50}"
+      CAMBIUM_BURST: "${CAMBIUM_BURST:-200}"
+      # Single sign-on (OIDC). Leave CAMBIUM_OIDC_ISSUER empty to use static tokens only.
+      # Values come from your identity-provider app registration; do not commit real ones.
+      CAMBIUM_OIDC_ISSUER: "${CAMBIUM_OIDC_ISSUER:-}"
+      CAMBIUM_OIDC_AUDIENCE: "${CAMBIUM_OIDC_AUDIENCE:-}"
+      CAMBIUM_OIDC_JWKS_URL: "${CAMBIUM_OIDC_JWKS_URL:-}"
+      CAMBIUM_OIDC_USER_CLAIM: "${CAMBIUM_OIDC_USER_CLAIM:-}"
+      CAMBIUM_OIDC_GROUPS_CLAIM: "${CAMBIUM_OIDC_GROUPS_CLAIM:-groups}"
+volumes:
+  cambium-data: {}

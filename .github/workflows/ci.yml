@@ -1,0 +1,87 @@
+# Cambium CI. Written for GitHub Actions (self-hosted runners)
+# pool; it has NOT been run on any hosted service from this repository.
+# Nothing here publishes or deploys: the image is built and scanned only.
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: "1.99.1"
+jobs:
+  lint:
+    runs-on: [self-hosted, linux]
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install $RUST_TOOLCHAIN --profile minimal -c rustfmt,clippy && rustup default $RUST_TOOLCHAIN
+      - name: fmt
+        run: cargo fmt --all -- --check
+      - name: clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+  test:
+    runs-on: [self-hosted, linux]
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env: { POSTGRES_USER: cambium, POSTGRES_PASSWORD: ci-only, POSTGRES_DB: cambium }
+        ports: ["5432:5432"]
+        options: --health-cmd "pg_isready -U cambium" --health-interval 2s --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install $RUST_TOOLCHAIN --profile minimal && rustup default $RUST_TOOLCHAIN
+      - run: sudo apt-get update && sudo apt-get install -y fuse3 sqlite3 openssl
+      - name: unit + integration + property tests
+        run: cargo test --workspace --locked
+      - name: Postgres integration tests
+        env: { CAMBIUM_TEST_PG: "postgres://cambium:ci-only@127.0.0.1:5432/cambium" }
+        run: cargo test --workspace --locked -- --ignored
+      - name: build
+        run: cargo build --workspace --locked && cargo build --workspace --locked --release
+      - name: end-to-end
+        run: bash tests/e2e.sh
+      - name: production checks
+        run: bash tests/prod.sh
+  audit:
+    runs-on: [self-hosted, linux]
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo install --locked cargo-audit cargo-deny
+      - name: cargo audit (RustSec advisories)
+        run: cargo audit --deny warnings
+      - name: cargo deny (advisories, licenses, bans, sources)
+        run: cargo deny --locked check
+  sbom:
+    runs-on: [self-hosted, linux]
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo install --locked cargo-cyclonedx
+      - run: cargo cyclonedx -f json --spec-version 1.5 && mkdir -p sbom && find crates -name '*.cdx.json' -exec mv {} sbom/ \;
+      - uses: actions/upload-artifact@v4
+        with: { name: sbom, path: sbom/, retention-days: 90 }
+  helm:
+    runs-on: [self-hosted, linux]
+    steps:
+      - uses: actions/checkout@v4
+      - name: lint, render, kubeconform, policy checks
+        run: bash tests/k8s-check.sh
+  image:
+    needs: [lint, test, audit, sbom, helm]
+    runs-on: [self-hosted, linux]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: sbom, path: sbom/ }
+      - name: build runtime + tools images (no push)
+        run: |
+          docker build --target runtime -t cambium:${{ github.sha }} .
+          docker build --target tools -t cambium-tools:${{ github.sha }} .
+      - name: container smoke test
+        run: IMG=cambium:${{ github.sha }} TOOLS_IMG=cambium-tools:${{ github.sha }} bash tests/docker-smoke.sh
+      # Pushing to your registry and signing are environment-specific;
+      # add them in your release pipeline (see docs/rollout-checklist.md).

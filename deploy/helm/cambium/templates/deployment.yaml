@@ -1,0 +1,80 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cambium.fullname" . }}
+  labels: {{- include "cambium.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  selector:
+    matchLabels: {{- include "cambium.selector" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "cambium.selector" . | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "cambium.fullname" . }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      securityContext: {{- include "cambium.podSecurity" . | nindent 8 }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: {{- include "cambium.selector" . | nindent 14 }}
+      containers:
+        - name: cmbd
+          image: {{ include "cambium.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- include "cambium.env" . | nindent 10 }}
+          ports:
+            - { name: http, containerPort: 7878, protocol: TCP }
+          securityContext: {{- include "cambium.containerSecurity" . | nindent 12 }}
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          startupProbe:
+            httpGet: { path: /healthz, port: http{{ if .Values.podTLS.enabled }}, scheme: HTTPS{{ end }} }
+            periodSeconds: 2
+            failureThreshold: 30
+          livenessProbe:
+            httpGet: { path: /healthz, port: http{{ if .Values.podTLS.enabled }}, scheme: HTTPS{{ end }} }
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /readyz, port: http{{ if .Values.podTLS.enabled }}, scheme: HTTPS{{ end }} }
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
+          volumeMounts:
+            - { name: data, mountPath: /data }
+            - { name: tmp, mountPath: /tmp }
+            {{- if .Values.podTLS.enabled }}
+            - { name: tls, mountPath: /tls, readOnly: true }
+            {{- end }}
+      volumes:
+        # node-local scratch only: metadata lives in Postgres, content in the object store
+        - name: data
+          emptyDir: { sizeLimit: 1Gi }
+        - name: tmp
+          emptyDir: { sizeLimit: 256Mi }
+        {{- if .Values.podTLS.enabled }}
+        - name: tls
+          secret: { secretName: {{ required "podTLS.secretName is required" .Values.podTLS.secretName }} }
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}

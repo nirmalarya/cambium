@@ -1,0 +1,101 @@
+# Cambium Helm values. Every hostname, CIDR and secret name below is a
+# placeholder: fill them in from your environment's configuration, never commit
+# real values here.
+replicaCount: 2
+
+image:
+  repository: registry.example.internal/cambium/cmbd   # placeholder registry
+  # Pin by digest in production (tag is informational only).
+  tag: "0.1.0"
+  digest: ""            # e.g. sha256:...  (wins over tag when set)
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# Multi-replica requires Postgres (CAMBIUM_DB) and a shared blob store (S3-compatible).
+# All secret values are read from an existing Secret you create out of band
+# (e.g. via your secrets operator). Keys expected in it:
+#   CAMBIUM_DB                      postgres://user:pass@host:5432/db?sslmode=require
+#   CAMBIUM_S3_ACCESS_KEY, CAMBIUM_S3_SECRET_KEY
+#   CAMBIUM_METRICS_TOKEN           (optional) bearer token required by /metrics
+existingSecret: cambium-secrets
+
+config:
+  CAMBIUM_ADDR: "0.0.0.0:7878"
+  CAMBIUM_BLOB: "s3"
+  CAMBIUM_S3_ENDPOINT: "https://object-store.example.internal"   # placeholder
+  CAMBIUM_S3_BUCKET: "cambium-blobs"
+  CAMBIUM_S3_REGION: "us-east-1"
+  CAMBIUM_S3_PREFIX: ""
+  CAMBIUM_DB_TLS: "require"
+  CAMBIUM_DB_STATEMENT_TIMEOUT_MS: "30000"
+  CAMBIUM_PG_POOL: "16"
+  CAMBIUM_AUTO_MIGRATE: "0"          # migrations run in the pre-upgrade Job instead
+  CAMBIUM_RATE: "50"
+  CAMBIUM_BURST: "200"
+  CAMBIUM_MAX_BODY_MB: "64"
+  CAMBIUM_REQUEST_TIMEOUT_S: "120"
+  CAMBIUM_HEADER_TIMEOUT_S: "15"
+  CAMBIUM_SHUTDOWN_DRAIN_S: "5"
+  CAMBIUM_SHUTDOWN_GRACE_S: "25"
+  CAMBIUM_TOKEN_TTL: "90d"
+  CAMBIUM_SESSION_TTL: "8h"
+  CAMBIUM_COOKIE_SECURE: "1"         # TLS is terminated at the internal ingress
+  CAMBIUM_HSTS: "1"
+  CAMBIUM_LOG: "info"
+  # Single sign-on (OIDC); values come from your IdP app registration.
+  CAMBIUM_OIDC_ISSUER: ""
+  CAMBIUM_OIDC_AUDIENCE: ""
+  CAMBIUM_OIDC_JWKS_URL: ""
+  CAMBIUM_OIDC_USER_CLAIM: ""
+  CAMBIUM_OIDC_GROUPS_CLAIM: "groups"
+extraEnv: []
+
+# TLS on the pod itself (optional; default is TLS at the internal ingress/proxy).
+podTLS:
+  enabled: false
+  secretName: ""                # kubernetes.io/tls secret with tls.crt / tls.key
+
+resources:
+  requests: { cpu: 500m, memory: 512Mi }
+  limits: { cpu: "2", memory: 2Gi }
+
+terminationGracePeriodSeconds: 40   # > drain (5s) + grace (25s)
+
+podDisruptionBudget:
+  minAvailable: 1
+
+service:
+  type: ClusterIP
+  port: 7878
+
+ingress:
+  enabled: false
+  className: ""                 # your internal ingress class
+  host: cambium.example.internal  # placeholder
+  tlsSecretName: ""
+  annotations: {}
+
+networkPolicy:
+  enabled: true
+  # Who may reach cmbd: the internal ingress controller and monitoring namespaces.
+  ingressFrom:
+    - namespaceSelector:
+        matchLabels: { kubernetes.io/metadata.name: ingress-internal }
+    - namespaceSelector:
+        matchLabels: { kubernetes.io/metadata.name: monitoring }
+  # Where cmbd may connect: Postgres, object store, IdP JWKS. CIDRs are placeholders.
+  egressTo:
+    - ipBlock: { cidr: 10.0.0.0/8 }
+  egressPorts: [5432, 443]
+
+serviceMonitor:
+  enabled: false
+  interval: 30s
+
+migrationJob:
+  enabled: true
+  backoffLimit: 1
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

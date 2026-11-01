@@ -1,0 +1,25 @@
+[package]
+name = "cambium-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+[[bin]]
+name = "cmb"
+path = "src/main.rs"
+[dependencies]
+cambium-core = { path = "../cambium-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "2", features = ["json"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pki-types = { version = "1.9", features = ["std"] }
+webpki-roots = "0.26"
+base64 = "0.22"
+sha2 = "0.10"
+hex = "0.4"
+rand = "0.8"
+notify = { version = "6", default-features = false, features = ["macos_kqueue"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+fuser = { version = "0.16", default-features = false }

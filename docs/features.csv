@@ -1,0 +1,57 @@
+feature,area,priority,original,clone,notes
+Create repository with root changeset and main ref,repo,must,yes,yes,
+Token authentication on every API call,auth,must,yes,yes,
+Server-side commit creation,commit,must,yes,yes,
+Changesets store only files changed vs first parent,data model,must,yes,yes,
+Changesets appended to a write-ahead log,data model,must,yes,yes,
+Content-addressed blob storage abstraction,storage,must,yes,yes,
+Refs moved by compare-and-swap on a single row,refs,must,yes,yes,
+Stale commit rejected when branch moved,refs,must,yes,yes,
+Status of local changes,client,must,yes,yes,
+Stage files including deletions,client,must,yes,yes,
+Create list and switch branches,refs,must,yes,yes,
+Server-side three-way merge,merge,must,yes,yes,"line-level merge3; conflicts reported, no conflict markers"
+Server-side rebase,merge,must,yes,yes,
+First-parent log with path filter,history,must,yes,yes,
+Blame served by server,history,must,yes,yes,
+Diff between changesets on server,history,must,yes,yes,
+Diff working copy against head,client,must,yes,yes,
+Sparse checkout of chosen directories,checkout,must,yes,yes,
+Client fetches only objects it wants,checkout,must,yes,yes,
+Bounded local object cache,client,must,yes,yes,"CAMBIUM_CACHE_MAX bytes, oldest-first eviction"
+API-only access without a working copy,api,must,yes,yes,
+Merge base query over API,api,should,yes,yes,
+Derived data computed recursively from parents,derived data,should,yes,yes,"manifest + blame kinds, lazily computed"
+Derived data cached and reused,derived data,should,yes,yes,
+Widen a sparse checkout later,checkout,should,yes,yes,
+Virtualized checkout materialising files on read,checkout,should,yes,yes,"cmb mount: FUSE lazy mount; listing from tree+sizes, blob fetched on first read; ACL-filtered; writable copy-on-write overlay (edit/create/delete/chmod/mkdir/rename stay local; cmb status/commit inside the mount; unmount keeps a salvage copy); --read-only option; Linux only; e2e V01-V10"
+Object-store (S3-compatible) blob backend,storage,should,yes,yes,"CAMBIUM_BLOB=s3: path-style SigV4 over HTTP, zlib + integrity check; signer matches the published AWS SigV4 test vector; tested against an in-process fake S3 that verifies signatures (tests/s3.rs); not yet run against a real S3/MinIO endpoint (image pull blocked here)"
+Compressed blobs,storage,should,yes,yes,
+Per-directory access control,auth,should,yes,yes,acl table (prefix x principal user/group/* x none|read|write|admin; longest prefix wins); enforced on tree/blob/log/diff/blame/commit/merge/rebase/ref moves; groups from static tokens or OIDC claims; core+server tests and e2e A03-A10
+Commit graph skip lists for fast ancestry,derived data,should,yes,partial,generation numbers per changeset + max-gen heap walk with pruning (is_ancestor stops below gen(a); merge-base two-colour); not skip lists so worst case still walks the gap
+Path history index,derived data,should,yes,yes,"path_history(repo,dir,gen,cs) for every path prefix; log <path> uses it + gen floor; backfill for older DBs; engine tests + e2e"
+Horizontally scalable stateless servers,scale,should,yes,yes,"CAMBIUM_DB=postgres:// metadata (CAS ref moves in one row) + shared blobs (CAMBIUM_BLOB_DIR or S3); tests/multinode.sh P01-P09: two cmbd nodes on one Postgres, concurrent commit race, 20 concurrent ref creates -> exactly one wins"
+Node-level shared object daemon,scale,could,yes,partial,"CAMBIUM_SHARED_CACHE: one group-shared (2770) content-addressed cache per machine, atomic writes, verified on every read; a shared directory, not a daemon; e2e Y01-Y04"
+Regional cache tier with identical RPCs,scale,could,yes,yes,"cmbd edge (CAMBIUM_UPSTREAM): same API, proxies everything, keeps blobs locally after first fetch (hash-verified); every cached read re-authorised upstream with a 1-byte ranged request using the caller's credentials; e2e Z01-Z06"
+Copy detection index,derived data,could,yes,partial,diff reports rename/copy by identical content (blob id); no similarity (edited-copy) detection and no persisted index; engine test + e2e X04
+Path-based file search index,derived data,could,yes,yes,"cmb search / GET /search: inverted token index keyed by blob (shared across revisions, incremental), path + content matches, exact verification, ACL-filtered; engine test + e2e X01-X03"
+Code review web UI,review,could,yes,yes,"/ui: sign-in with token (HttpOnly SameSite=Strict cookie), repo + review pages with diff, comment/approve/merge forms with CSRF value, HTML-escaped output; JSON API + cmb review; e2e W07-W16"
+Semantic approval rules,review,could,yes,yes,"protected branches with N approvals; author cannot self-approve; stale after new push; OWNERS code-owner files read from the target branch (user/group rules, author cannot satisfy); pending owners shown in API and UI; no content-based rules; prod.rs + prod.sh P28-P30"
+Filesystem change monitoring in client,client,could,yes,yes,cmb watch (inotify via notify crate): status/add/commit hash only changed paths after one baseline scan; falls back to full scan if the watcher dies or the queue overflows; e2e U01-U05
+No packfiles and no repository maintenance,storage,could,yes,yes,by construction: loose content-addressed objects
+Git ingestion pipeline,migration,could,yes,yes,"cmbd import-git <dir> <repo>: every commit on branches/tags with author, time, message, both merge parents, exec/symlink modes; branches + tags/<name> refs; submodules skipped and reported; octopus keeps first two parents; core test + e2e I01-I04"
+Planet-scale multi-region replicated database,storage,could,yes,skip,managed cloud infrastructure not a product feature
+Internal monitoring agents per component,ops,could,yes,skip,their internal operations
+Offline commit outbox with server-side rebase on flush,client,should,no,yes,added: answers the top complaint (online-only)
+Per-object fetch that is resumable (no bundle response),checkout,should,yes,yes,blobs served with HTTP Range (206/416); client appends to a partial file and resumes at the saved byte after a dropped connection or killed process; e2e R01-R04
+Rate limiting on server APIs,auth,could,yes,yes,per-token token bucket (CAMBIUM_RATE/CAMBIUM_BURST); 429 + Retry-After; client waits and retries (CAMBIUM_MAX_RETRIES); unit + server tests + e2e L01-L04
+Executable bit and symlink modes preserved,data model,should,yes,yes,mode column per file entry (100644/100755/120000); kept through commit/checkout/sync/merge/rebase/diff; shown in status and diff; e2e M01-M05
+Health and readiness probes with graceful drain,ops,should,no,yes,"added (production hardening): /healthz, /readyz (db+blob); SIGTERM flips readyz then drains; prod.sh P01-P02 P32-P33"
+Prometheus metrics and structured JSON logs with request ids,ops,should,no,yes,added (production hardening): /metrics (optional token); x-request-id propagated; prod.sh P03-P09
+Tamper-evident audit log with SIEM export,auth,should,no,yes,"added (production hardening): hash chain, DB triggers block UPDATE/DELETE, cmbd audit export/verify; pg two-node test; prod.sh P22-P26"
+"Token lifecycle (TTL, rotate, revoke, list)",auth,should,no,yes,added (production hardening): prod.sh P18-P21 + prod.rs
+Native TLS with HSTS and custom CA for the client,auth,should,no,yes,"added (production hardening): CAMBIUM_TLS_CERT/KEY, CAMBIUM_CA; prod.sh P34-P37"
+Versioned schema migrations,ops,should,no,yes,added (production hardening): cmbd migrate [--status]; newer DB refused; Helm pre-upgrade job; prod.rs + P27
+Backup and restore with verification,ops,should,no,yes,"added (production hardening): cmbd backup/restore, manifest checksums, refuses non-empty target; tests/restore-drill.sh 12/12"
+Idempotent commit retries,commit,could,no,yes,added (production hardening): Idempotency-Key per caller; prod.sh P14-P17
+Kubernetes deployment (Helm chart),ops,should,no,yes,"added (production hardening): hardened pod spec, PDB, NetworkPolicy, ServiceMonitor; helm lint + kubeconform 1.28-1.31 (tests/k8s-check.sh); not applied to a real cluster"

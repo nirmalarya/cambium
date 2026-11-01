@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "cambium.fullname" . }}
+  labels: {{- include "cambium.labels" . | nindent 4 }}
+data:
+  CAMBIUM_DATA: /data
+{{- range $k, $v := .Values.config }}
+  {{ $k }}: {{ $v | quote }}
+{{- end }}
+{{- if .Values.podTLS.enabled }}
+  CAMBIUM_TLS_CERT: /tls/tls.crt
+  CAMBIUM_TLS_KEY: /tls/tls.key
+{{- end }}

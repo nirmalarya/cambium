@@ -1,0 +1,9 @@
+[workspace]
+resolver = "2"
+members = ["crates/cambium-core", "crates/cambium-server", "crates/cambium-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Server-centric source control for monorepos where most commits come from agents and CI"

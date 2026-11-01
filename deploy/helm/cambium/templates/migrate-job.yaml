@@ -1,0 +1,40 @@
+{{- if .Values.migrationJob.enabled }}
+# Runs versioned schema migrations once, before new pods roll out. The
+# Deployment runs with CAMBIUM_AUTO_MIGRATE=0, so pods refuse to start against a
+# schema that has not been migrated yet.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "cambium.fullname" . }}-migrate-{{ .Release.Revision }}
+  labels: {{- include "cambium.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.migrationJob.backoffLimit }}
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels: {{- include "cambium.selector" . | nindent 8 }}
+        app.kubernetes.io/component: migrate
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "cambium.fullname" . }}
+      automountServiceAccountToken: false
+      securityContext: {{- include "cambium.podSecurity" . | nindent 8 }}
+      containers:
+        - name: migrate
+          image: {{ include "cambium.image" . }}
+          args: ["migrate"]
+          {{- include "cambium.env" . | nindent 10 }}
+          securityContext: {{- include "cambium.containerSecurity" . | nindent 12 }}
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 512Mi }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+      volumes:
+        - name: data
+          emptyDir: { sizeLimit: 256Mi }
+{{- end }}
