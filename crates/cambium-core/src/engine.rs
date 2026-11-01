@@ -201,6 +201,22 @@ pub fn valid_path(p: &str) -> bool {
     !p.is_empty() && !p.starts_with('/') && !p.contains('\\') && p.split('/').all(|s| !s.is_empty() && s != "." && s != ".." && s != ".cambium")
 }
 
+/// If `path` is a file in `m` but one of its parent directories is also a file, or other files
+/// live under `path/`, return the conflicting path. Such trees cannot be laid out on disk, and a
+/// symlink at a parent position would let a client write outside its working copy.
+pub fn file_dir_conflict(m: &Manifest, path: &str) -> Option<String> {
+    let mut i = 0;
+    while let Some(j) = path[i..].find('/') {
+        let parent = &path[..i + j];
+        if m.contains_key(parent) {
+            return Some(parent.to_string());
+        }
+        i += j + 1;
+    }
+    let under = format!("{path}/");
+    m.range(under.clone()..).next().filter(|(k, _)| k.starts_with(&under)).map(|(k, _)| k.clone())
+}
+
 /// Every directory prefix of `path` plus the path itself ("a/b/c" -> "", "a", "a/b", "a/b/c").
 pub fn path_keys(path: &str) -> Vec<String> {
     let mut v = vec![String::new()];
@@ -402,6 +418,26 @@ impl Engine {
             if let Some(b) = &f.blob {
                 if !self.blobs.has(b) {
                     return Err(Error::Bad(format!("missing blob {b}")));
+                }
+            }
+        }
+        if parents.len() > 2 {
+            return Err(Error::Bad("a changeset has at most two parents".into()));
+        }
+        if files.iter().any(|f| f.blob.is_some()) {
+            let mut m = match parents.first() {
+                Some(p1) => self.manifest(repo, p1)?,
+                None => Manifest::new(),
+            };
+            for f in &files {
+                match &f.blob {
+                    Some(b) => m.insert(f.path.clone(), b.clone()),
+                    None => m.remove(&f.path),
+                };
+            }
+            for f in files.iter().filter(|f| f.blob.is_some()) {
+                if let Some(c) = file_dir_conflict(&m, &f.path) {
+                    return Err(Error::Bad(format!("{} conflicts with {c}: a path cannot be both a file and a directory", f.path)));
                 }
             }
         }

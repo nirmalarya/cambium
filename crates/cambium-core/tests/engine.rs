@@ -505,3 +505,35 @@ fn search_index_finds_exact_matches_and_is_shared() {
     assert_eq!(e.index_blobs(&e.manifest("r", &c2.id).unwrap()).unwrap(), 1);
     assert_eq!(e.search(&e.manifest("r", &c2.id).unwrap(), "OPEN_ENGINE", 1).unwrap().len(), 1, "limit");
 }
+
+#[test]
+fn file_and_directory_at_same_path_rejected() {
+    // A symlink `a` plus a file `a/x` would let a client write through the link.
+    let (e, _d) = eng();
+    let root = e.create_repo("r", "u").unwrap();
+    let link = FileChange { mode: MODE_LINK, ..put(&e, "a", "/home/victim/.ssh") };
+    let r = e.commit("r", "main", &root, "u", "evil", vec![link.clone(), put(&e, "a/authorized_keys", "key")]);
+    assert!(matches!(r, Err(Error::Bad(_))), "same changeset: {r:?}");
+    // split over two changesets
+    let c1 = e.commit("r", "main", &root, "u", "link", vec![link]).unwrap();
+    assert!(e.commit("r", "main", &c1.id, "u", "under link", vec![put(&e, "a/authorized_keys", "key")]).is_err());
+    // and the other way round: a file where a folder already is
+    let c2 = e.commit("r", "main", &c1.id, "u", "dir", vec![put(&e, "d/x", "1")]).unwrap();
+    assert!(e.commit("r", "main", &c2.id, "u", "file over dir", vec![put(&e, "d", "2")]).is_err());
+}
+#[test]
+fn replacing_a_link_with_a_folder_is_allowed() {
+    let (e, _d) = eng();
+    let root = e.create_repo("r", "u").unwrap();
+    let c1 = e.commit("r", "main", &root, "u", "link", vec![FileChange { mode: MODE_LINK, ..put(&e, "a", "t") }]).unwrap();
+    let del = FileChange { path: "a".into(), blob: None, mode: MODE_FILE };
+    let c2 = e.commit("r", "main", &c1.id, "u", "folder", vec![del, put(&e, "a/x", "1")]).unwrap();
+    assert_eq!(e.manifest("r", &c2.id).unwrap().keys().collect::<Vec<_>>(), vec!["a/x"]);
+}
+#[test]
+fn more_than_two_parents_rejected() {
+    let (e, _d) = eng();
+    let root = e.create_repo("r", "u").unwrap();
+    let r = e.create_changeset("r", vec![root.clone(), root.clone(), root], "u", "octopus", vec![]);
+    assert!(r.is_err());
+}

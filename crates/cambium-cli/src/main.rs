@@ -415,10 +415,37 @@ fn set_mode(p: &Path, mode: u32) {
     }
 }
 /// Write one manifest entry (content + mode) into the working copy.
+/// Resolve a server-provided path inside the working copy. Refuses paths that are not
+/// plain relative paths, and paths whose parent directories are symlinks or files, so
+/// nothing the server sends can make us write or delete outside `root`.
+fn wc_path(root: &Path, p: &str) -> Result<PathBuf, String> {
+    if !cambium_core::engine::valid_path(p) {
+        return Err(format!("server sent an unsafe path {p:?}; refusing to touch it"));
+    }
+    let mut cur = root.to_path_buf();
+    let segs: Vec<&str> = p.split('/').collect();
+    for seg in &segs[..segs.len() - 1] {
+        cur.push(seg);
+        match std::fs::symlink_metadata(&cur) {
+            Ok(m) if m.file_type().is_symlink() => {
+                return Err(format!("refusing to touch {p}: {} is a symlink", cur.strip_prefix(root).unwrap_or(&cur).display()))
+            }
+            Ok(m) if !m.is_dir() => return Err(format!("cannot write {p}: {} is a file", cur.strip_prefix(root).unwrap_or(&cur).display())),
+            _ => {}
+        }
+    }
+    Ok(root.join(p))
+}
 fn write_entry(c: &Client, root: &Path, p: &str, e: &str) {
     let (blob, mode) = split_entry(e);
-    let fp = root.join(p);
-    std::fs::create_dir_all(fp.parent().unwrap()).unwrap();
+    let fp = wc_path(root, p).unwrap_or_else(|e| die(e));
+    // a folder that became a file: remove it if it is empty (its files were removed first)
+    if std::fs::symlink_metadata(&fp).map(|m| m.is_dir()).unwrap_or(false) {
+        let _ = std::fs::remove_dir(&fp);
+    }
+    if let Err(err) = std::fs::create_dir_all(fp.parent().unwrap()) {
+        die(format!("cannot create the folder for {p}: {err}"));
+    }
     let data = c.get_blob(blob);
     if is_link(&fp) || (mode == MODE_LINK && present(&fp)) {
         let _ = std::fs::remove_file(&fp);
@@ -517,6 +544,19 @@ fn materialise(c: &Client, root: &Path, s: &mut State, target: &str) {
     let t = c.post(&format!("/v1/repos/{}/tree", s.repo), json!({"rev": target, "prefixes": s.sparse}));
     let entries: BTreeMap<String, String> = serde_json::from_value(t["entries"].clone()).unwrap();
     let (mut fetched, mut removed) = (0, 0);
+    // removals first, so a path can change between file, folder and symlink
+    for p in s.files.keys() {
+        if !entries.contains_key(p) && !local.contains_key(p) {
+            match wc_path(root, p) {
+                Ok(fp) => {
+                    let _ = std::fs::remove_file(&fp);
+                    remove_empty_parents(root, &fp);
+                }
+                Err(e) => eprintln!("cmb: {e}"),
+            }
+            removed += 1;
+        }
+    }
     for (p, b) in &entries {
         if s.files.get(p) == Some(b) {
             continue;
@@ -527,12 +567,6 @@ fn materialise(c: &Client, root: &Path, s: &mut State, target: &str) {
         write_entry(c, root, p, b);
         fetched += 1;
     }
-    for p in s.files.keys() {
-        if !entries.contains_key(p) && !local.contains_key(p) {
-            let _ = std::fs::remove_file(root.join(p));
-            removed += 1;
-        }
-    }
     s.files = entries;
     s.head = t["cs"].as_str().unwrap().to_string();
     eprintln!("at {} ({} files fetched, {} removed, {} tracked)", short(&s.head), fetched, removed, s.files.len());
@@ -542,6 +576,16 @@ fn materialise(c: &Client, root: &Path, s: &mut State, target: &str) {
             CACHE_HITS.load(std::sync::atomic::Ordering::Relaxed),
             NET_FETCHES.load(std::sync::atomic::Ordering::Relaxed)
         );
+    }
+}
+/// Remove now-empty folders between `fp` and the working-copy root.
+fn remove_empty_parents(root: &Path, fp: &Path) {
+    let mut d = fp.parent();
+    while let Some(dir) = d {
+        if dir == root || std::fs::remove_dir(dir).is_err() {
+            break;
+        }
+        d = dir.parent();
     }
 }
 fn short(id: &str) -> &str {
@@ -1153,4 +1197,33 @@ fn http() -> &'static ureq::Agent {
         }
         b.build()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn wc_path_refuses_escapes() {
+        let d = tempfile_dir();
+        let root = d.as_path();
+        assert!(wc_path(root, "a/b.txt").is_ok());
+        assert!(wc_path(root, "../evil").is_err());
+        assert!(wc_path(root, "/etc/passwd").is_err());
+        assert!(wc_path(root, ".cambium/state.json").is_err());
+        #[cfg(unix)]
+        {
+            let outside = tempfile_dir();
+            std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
+            assert!(wc_path(root, "link/authorized_keys").is_err(), "must not write through a symlinked folder");
+            std::fs::write(root.join("f"), "x").unwrap();
+            assert!(wc_path(root, "f/x").is_err());
+            let _ = std::fs::remove_dir_all(outside);
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+    fn tempfile_dir() -> PathBuf {
+        let p = std::env::temp_dir().join(format!("cmb-test-{}-{}", std::process::id(), rand::random::<u64>()));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
 }
