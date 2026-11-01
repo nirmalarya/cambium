@@ -49,11 +49,10 @@ Scion in turn credits Meta's [Sapling](https://github.com/facebook/sapling) serv
 Earlier centralized systems (CVS, Subversion, Perforce) and Google's Piper are also prior art.
 
 ## Known issues
-A review in November 2026 found security and data-integrity bugs that must be fixed before production use,
-including: symlinks in a changeset can make the client write outside the working copy; the `diff`
-overlay can read blobs outside a user's permissions; rate limiting is keyed on the raw Authorization
-header; concurrent filesystem blob writes can leave a truncated object; three-way merges corrupt
-binary files. The offline commit outbox (`outbox`/`flush`) has known data-loss bugs and is planned for removal.
+Cambium is early alpha. Security and data-integrity hardening is in progress; open items include
+rate-limit keying, filesystem blob-store write durability, three-way merges of binary files,
+session revocation, and removal of the offline commit outbox (`outbox`/`flush`).
+Do not use it for production data yet.
 
 ## License
 [MIT](LICENSE)
