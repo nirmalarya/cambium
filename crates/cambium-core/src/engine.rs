@@ -640,6 +640,21 @@ impl Engine {
         self.db.exec("INSERT INTO blob_meta(blob,size) VALUES(?1,?2) ON CONFLICT DO NOTHING", p![&id, data.len() as i64])?;
         Ok(id)
     }
+    /// Store a blob uploaded by `who` and remember that they had its bytes.
+    pub fn put_blob_as(&self, data: &[u8], who: &Principal) -> Result<String> {
+        let id = self.put_blob(data)?;
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+        self.db.exec("INSERT INTO blob_uploads(blob,principal,created_at) VALUES(?1,?2,?3) ON CONFLICT DO NOTHING", p![&id, &who.user, now])?;
+        Ok(id)
+    }
+    /// May `who` reference blob `id` in a commit or diff? Yes if they can read it
+    /// through some path, or if they uploaded its bytes themselves.
+    pub fn blob_usable(&self, id: &str, who: &Principal) -> Result<bool> {
+        if self.db.one("SELECT 1 FROM blob_uploads WHERE blob=?1 AND principal=?2", p![id, &who.user])?.is_some() {
+            return Ok(true);
+        }
+        self.blob_readable(id, who)
+    }
     /// Uncompressed size of a blob (recorded at upload, computed once otherwise).
     pub fn blob_size(&self, id: &str) -> Result<i64> {
         if let Some(r) = self.db.one("SELECT size FROM blob_meta WHERE blob=?1", p![id])? {

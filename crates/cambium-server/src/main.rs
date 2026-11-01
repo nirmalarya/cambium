@@ -175,8 +175,8 @@ async fn resolve(State(st): State<St>, h: HeaderMap, Path((r, rev)): Path<(Strin
     Ok(Json(json!({"cs": st.resolve(&r, &rev)?})))
 }
 async fn put_blob(State(st): State<St>, h: HeaderMap, body: Bytes) -> R {
-    user(&st, &h)?;
-    Ok(Json(json!({"id": st.put_blob(&body)?})))
+    let u = user(&st, &h)?;
+    Ok(Json(json!({"id": st.put_blob_as(&body, &u)?})))
 }
 /// Whole blob, or one byte range of it (`Range: bytes=N-`) so an interrupted fetch can resume.
 async fn get_blob(State(st): State<St>, h: HeaderMap, Path(id): Path<String>) -> Result<Response, ApiErr> {
@@ -237,9 +237,23 @@ struct Commit {
     message: String,
     files: Vec<FileChange>,
 }
+/// The caller may only reference blobs they can read or uploaded themselves. A hidden
+/// blob gets the same answer as a missing one, so its id is not confirmed.
+fn need_blob(st: &St, id: &str, u: &Principal) -> Result<(), ApiErr> {
+    if st.blob_usable(id, u)? {
+        Ok(())
+    } else {
+        Err(ApiErr(Error::Bad(format!("missing blob {id}"))))
+    }
+}
 async fn commit(State(st): State<St>, h: HeaderMap, Path(r): Path<String>, Json(b): Json<Commit>) -> R {
     let u = user(&st, &h)?;
     check_writes(&st.authz(&r, &u)?, &b.files)?;
+    for f in &b.files {
+        if let Some(id) = &f.blob {
+            need_blob(&st, id, &u)?;
+        }
+    }
     guard_protected(&st, &r, &b.r#ref)?;
     Ok(Json(json!(st.commit(&r, &b.r#ref, &b.expected, &u.user, &b.message, b.files)?)))
 }
@@ -373,6 +387,7 @@ async fn diff(State(st): State<St>, h: HeaderMap, Path(r): Path<String>, Json(b)
                 }
                 match v {
                     Some(x) => {
+                        need_blob(&st, split_entry(&x).0, &u)?;
                         mb.insert(p, x);
                     }
                     None => {
@@ -718,6 +733,53 @@ mod tests {
         b.body(Body::empty()).unwrap()
     }
 
+    fn post(uri: &str, tok: &str, body: Value) -> Req<Body> {
+        Req::post(uri)
+            .header("authorization", format!("Bearer {tok}"))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    /// Hidden blobs cannot be pulled out through the diff overlay or a commit.
+    #[tokio::test]
+    async fn hidden_blob_not_readable_via_diff_or_commit() {
+        let (app, alice, e, _d) = setup(0.0, 1.0);
+        let bob = e.create_token("bob").unwrap();
+        let root = e.create_repo("r", "alice").unwrap();
+        let secret = e.put_blob(b"salaries\n").unwrap();
+        let open = e.put_blob(b"hello\n").unwrap();
+        let fc = |p: &str, b: &str| cambium_core::FileChange { path: p.into(), blob: Some(b.into()), mode: cambium_core::engine::MODE_FILE };
+        let c = e.commit("r", "main", &root, "alice", "init", vec![fc("pub/a", &open), fc("pay/s", &secret)]).unwrap();
+        let a = Principal { user: "alice".into(), groups: vec![] };
+        e.set_acl("r", &a, "", "user:alice", Some(Perm::Admin)).unwrap();
+        e.set_acl("r", &a, "pub", "user:bob", Some(Perm::Write)).unwrap();
+
+        // diff overlay with the hidden blob under a path bob can read
+        let r = app.clone().oneshot(post("/v1/repos/r/diff", &bob, json!({"from": "main", "overlay": {"pub/a": secret}}))).await.unwrap();
+        assert_eq!(r.status(), 400);
+        let body = to_bytes(r.into_body(), 10_000).await.unwrap();
+        assert!(!String::from_utf8_lossy(&body).contains("salaries"));
+        // commit the hidden blob under a writable path, then try to read it back
+        let r = app
+            .clone()
+            .oneshot(post("/v1/repos/r/commit", &bob, json!({"ref": "main", "expected": c.id, "message": "m", "files": [{"path": "pub/x", "blob": secret}]})))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 400);
+        // alice (who can read it) may still reference it
+        let r = app.clone().oneshot(post("/v1/repos/r/diff", &alice, json!({"from": "main", "overlay": {"pub/a": secret}}))).await.unwrap();
+        assert_eq!(r.status(), 200);
+        // bob may commit identical bytes if he uploads them himself
+        let up = Req::post("/v1/blobs").header("authorization", format!("Bearer {bob}")).body(Body::from("salaries\n")).unwrap();
+        assert_eq!(app.clone().oneshot(up).await.unwrap().status(), 200);
+        let r = app
+            .oneshot(post("/v1/repos/r/commit", &bob, json!({"ref": "main", "expected": c.id, "message": "m", "files": [{"path": "pub/x", "blob": secret}]})))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+    }
+
     #[tokio::test]
     async fn blob_range_resume() {
         let (app, t, e, _d) = setup(0.0, 1.0);
@@ -892,6 +954,10 @@ mod tests {
             200
         );
         let head = e.get_ref("r", "main").unwrap().unwrap();
+        // `blob` is now also at pay/x, hidden from dev: dev must upload the bytes to use it
+        assert_eq!(app.clone().oneshot(post(&dev, "/v1/repos/r/commit", body("pub/x", &head))).await.unwrap().status(), 400);
+        let up = Req::post("/v1/blobs").header("authorization", format!("Bearer {dev}")).body(Body::from("new\n")).unwrap();
+        assert_eq!(app.clone().oneshot(up).await.unwrap().status(), 200);
         assert_eq!(app.clone().oneshot(post(&dev, "/v1/repos/r/commit", body("pub/x", &head))).await.unwrap().status(), 200);
         // log hides changesets that only touched pay/
         let r = app.clone().oneshot(get("/v1/repos/r/log?rev=main", &dev, None)).await.unwrap();
