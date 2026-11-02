@@ -23,7 +23,9 @@ cmbd ──(outbound, internal only)──▶ identity provider JWKS endpoint (s
 **Server settings** (placeholders are in `.env.example`; real values come from the app registration and are never committed):
 - `CAMBIUM_OIDC_ISSUER`, `CAMBIUM_OIDC_AUDIENCE`: both must match exactly.
 - `CAMBIUM_OIDC_JWKS_URL` or `CAMBIUM_OIDC_JWKS_FILE`: the provider's signing keys.
-- `CAMBIUM_OIDC_USER_CLAIM`: default `preferred_username`, then `email`, then `sub`.
+- `CAMBIUM_OIDC_USER_CLAIM`: default `preferred_username`, then `email` (only if `email_verified` is true), then `sub`. Usernames and emails can change or be reassigned; for stable identities set this to an immutable claim such as `sub` (or `oid` on Microsoft Entra ID) and write ACLs against those values.
+- An OIDC login whose name equals a static-token account (`cmbd token <name>`) is refused, so an identity-provider claim can never inherit a service account's permissions. Give service accounts names that cannot collide with people (for example `ci-…`).
+- JWKS keys are refetched on an unknown key id at most once every 5 minutes (failed attempts count), so an unreachable provider cannot stall sign-in.
 - `CAMBIUM_OIDC_GROUPS_CLAIM`: default `groups`.
 
 **What the server checks:**

@@ -980,6 +980,25 @@ mod tests {
         assert!(o.verify(&forged).is_err());
     }
 
+    #[test]
+    fn oidc_identity_cannot_take_over_static_accounts_or_use_unverified_email() {
+        let o = oidc();
+        let d = tempfile::tempdir().unwrap();
+        let e = Engine::open(d.path().join("t.db").to_str().unwrap(), Arc::new(MemBlobStore::default())).unwrap();
+        e.create_token("ci-bot").unwrap();
+        let t = jwt(good("ci-bot", &["admins"]), "test-key-1");
+        assert!(auth::authenticate(&e, Some(&o), &t).is_err(), "OIDC name equal to a static account is refused");
+        assert_eq!(auth::authenticate(&e, Some(&o), &jwt(good("dana", &[]), "test-key-1")).unwrap().user, "dana");
+        // without preferred_username, an unverified email is skipped in favour of sub
+        let mut c = good("x", &[]);
+        c.as_object_mut().unwrap().remove("preferred_username");
+        c["email"] = json!("boss@example.test");
+        c["sub"] = json!("sub-123");
+        assert_eq!(o.verify(&jwt(c.clone(), "test-key-1")).unwrap().user, "sub-123");
+        c["email_verified"] = json!(true);
+        assert_eq!(o.verify(&jwt(c, "test-key-1")).unwrap().user, "boss@example.test");
+    }
+
     #[tokio::test]
     async fn acl_enforced_for_oidc_and_static_identities() {
         let d = tempfile::tempdir().unwrap();

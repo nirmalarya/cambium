@@ -85,6 +85,11 @@ impl Engine {
         )?;
         self.create_token_full(user, &groups_of(&cur.s(0)), ttl, &cur.s(1))
     }
+    /// Does a static token (live or not) exist for `user`? Such names are reserved
+    /// for static-token accounts.
+    pub fn is_static_user(&self, user: &str) -> Result<bool> {
+        Ok(self.db.one("SELECT 1 FROM tokens WHERE user_name=?1 LIMIT 1", p![user])?.is_some())
+    }
     /// Revoke every token of `user`; returns how many.
     pub fn revoke_tokens(&self, user: &str) -> Result<u64> {
         let n = self.db.exec("UPDATE tokens SET revoked=1 WHERE user_name=?1 AND revoked=0", p![user])?;

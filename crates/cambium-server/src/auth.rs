@@ -50,13 +50,15 @@ impl OidcConfig {
 
 pub struct Oidc {
     cfg: OidcConfig,
-    keys: RwLock<(JwkSet, Instant)>,
+    keys: RwLock<JwkSet>,
+    /// Last refetch attempt (successful or not); refetches happen at most every 5 min.
+    last_fetch: std::sync::Mutex<Instant>,
 }
 
 impl Oidc {
     pub fn new(cfg: OidcConfig) -> Result<Self, String> {
         let keys = Self::load(&cfg)?;
-        Ok(Self { cfg, keys: RwLock::new((keys, Instant::now())) })
+        Ok(Self { cfg, keys: RwLock::new(keys), last_fetch: std::sync::Mutex::new(Instant::now()) })
     }
     fn load(cfg: &OidcConfig) -> Result<JwkSet, String> {
         let text = if let Some(f) = &cfg.jwks_file {
@@ -64,7 +66,7 @@ impl Oidc {
         } else {
             let u = cfg.jwks_url.as_ref().unwrap();
             ureq::get(u)
-                .timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(5))
                 .call()
                 .map_err(|e| format!("fetch {u}: {e}"))?
                 .into_string()
@@ -86,17 +88,24 @@ impl Oidc {
             };
             Some((DecodingKey::from_jwk(jwk).ok()?, alg))
         };
-        if let Some(k) = find(&self.keys.read().unwrap().0) {
+        if let Some(k) = find(&self.keys.read().unwrap()) {
             return Some(k);
         }
-        // unknown key id: the provider may have rotated keys; refetch (rate-limited)
-        let mut w = self.keys.write().unwrap();
-        if w.1.elapsed() > Duration::from_secs(300) {
-            if let Ok(set) = Self::load(&self.cfg) {
-                *w = (set, Instant::now());
+        // Unknown key id: the provider may have rotated keys. Refetch at most once per
+        // 5 minutes, counting failed attempts too, and without holding the key lock, so
+        // a slow or down provider (or junk tokens with random kids) cannot stall auth.
+        {
+            let mut last = self.last_fetch.lock().unwrap();
+            if last.elapsed() < Duration::from_secs(300) {
+                return None;
             }
+            *last = Instant::now();
         }
-        find(&w.0)
+        match Self::load(&self.cfg) {
+            Ok(set) => *self.keys.write().unwrap() = set,
+            Err(e) => cambium_core::log::error("JWKS refetch failed", serde_json::json!({"error": e})),
+        }
+        find(&self.keys.read().unwrap())
     }
     pub fn verify(&self, jwt: &str) -> Result<Principal, Error> {
         let h = decode_header(jwt).map_err(|_| Error::Unauthorized)?;
@@ -112,7 +121,11 @@ impl Oidc {
         let claims: Value = decode::<Value>(jwt, &key, &v).map_err(|_| Error::Unauthorized)?.claims;
         let user = match &self.cfg.user_claim {
             Some(c) => claims[c].as_str(),
-            None => claims["preferred_username"].as_str().or(claims["email"].as_str()).or(claims["sub"].as_str()),
+            // email only counts when the provider says it is verified
+            None => claims["preferred_username"]
+                .as_str()
+                .or(claims["email"].as_str().filter(|_| claims["email_verified"].as_bool() == Some(true)))
+                .or(claims["sub"].as_str()),
         }
         .filter(|u| !u.is_empty())
         .ok_or(Error::Unauthorized)?
@@ -126,7 +139,6 @@ impl Oidc {
     }
 }
 
-/// Static tokens first (cheap, local), then OIDC if configured.
 /// `exp` of an already-verified JWT (None for other credentials).
 pub fn jwt_exp(token: &str) -> Option<i64> {
     use base64::Engine as _;
@@ -135,12 +147,22 @@ pub fn jwt_exp(token: &str) -> Option<i64> {
     let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(body.trim_end_matches('=')).ok()?;
     serde_json::from_slice::<Value>(&raw).ok()?["exp"].as_i64()
 }
+/// Static tokens first (cheap, local), then OIDC if configured. An OIDC user whose
+/// name matches a static-token account is refused: an identity provider claim must
+/// never inherit a service account's permissions.
 pub fn authenticate(eng: &Engine, oidc: Option<&Oidc>, bearer: &str) -> Result<Principal, Error> {
     if bearer.starts_with("cmbt_") {
         return eng.verify_principal(bearer);
     }
     match oidc {
-        Some(o) if bearer.split('.').count() == 3 => o.verify(bearer),
+        Some(o) if bearer.split('.').count() == 3 => {
+            let p = o.verify(bearer)?;
+            if eng.is_static_user(&p.user)? {
+                cambium_core::log::error("OIDC identity collides with a static-token account; refused", serde_json::json!({"user": p.user}));
+                return Err(Error::Unauthorized);
+            }
+            Ok(p)
+        }
         _ => Err(Error::Unauthorized),
     }
 }
