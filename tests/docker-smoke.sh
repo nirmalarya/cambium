@@ -2,7 +2,7 @@
 # Container smoke test: the built image serves the API, review UI, search,
 # protection and import-git. Local only (host network, loopback port).
 set -u
-IMG=${IMG:-cambium:dev}; TOOLS_IMG=${TOOLS_IMG:-${IMG%:*}:tools}; PORT=${PORT:-7880}; B=${BIN:-${CARGO_TARGET_DIR:-target}/debug}
+IMG=${IMG:-cambium:dev}; TOOLS_IMG=${TOOLS_IMG:-${IMG%:*}:tools}; PORT=${PORT:-7880}; B=${BIN:-${CARGO_TARGET_DIR:-$PWD/target}/debug}
 S=$(mktemp -d); chmod 755 $S; mkdir $S/g
 (cd $S/g && git init -q -b main . && git -c user.name=S -c user.email=s@example.invalid commit -q --allow-empty -m e \
   && echo hi > h.txt && git add h.txt && git -c user.name=S -c user.email=s@example.invalid commit -qm h); chmod -R a+rX $S/g

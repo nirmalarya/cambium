@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 200 concurrent committers against SQLite and against Postgres (release build).
 set -u
-BIN=${BIN:-${CARGO_TARGET_DIR:-target}/release}
+BIN=${BIN:-${CARGO_TARGET_DIR:-$PWD/target}/release}
 PGURL=${PGURL:-postgres://cambium:cambiumtest@127.0.0.1:55432}
 D=$(cd "$(dirname "$0")" && pwd); T=$(mktemp -d); OUT=${OUT:-$T/results.jsonl}
 ulimit -n 65536 2>/dev/null || true

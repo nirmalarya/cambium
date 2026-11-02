@@ -3,7 +3,7 @@
 # Starts postgres:16-alpine in a local container (host networking, loopback only),
 # runs the Rust Postgres tests, the full e2e suite against Postgres, then cross-node checks.
 set -u
-BIN=${BIN:-${CARGO_TARGET_DIR:-target}/debug}
+BIN=${BIN:-${CARGO_TARGET_DIR:-$PWD/target}/debug}
 PGPORT=${PGPORT:-55432}
 export CAMBIUM_DB="postgresql://cambium:cambiumtest@127.0.0.1:$PGPORT/cambium"   # local throwaway container only
 pass=0; fail=0

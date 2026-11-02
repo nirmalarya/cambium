@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # End-to-end: real cmbd server + cmb client, every command in the vertical slice.
 set -u
-BIN=${BIN:-${CARGO_TARGET_DIR:-target}/debug}
+BIN=${BIN:-${CARGO_TARGET_DIR:-$PWD/target}/debug}
 T=$(mktemp -d); export CAMBIUM_DATA=$T/data CAMBIUM_ADDR=127.0.0.1:${PORT:-7979} CAMBIUM_CACHE=$T/cache
 export CAMBIUM_SERVER=http://$CAMBIUM_ADDR
 pass=0; fail=0

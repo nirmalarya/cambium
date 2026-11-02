@@ -2,7 +2,7 @@
 # Production hardening checks against a real cmbd: probes, metrics, audit, tokens,
 # migrations, idempotency, limits, TLS, graceful shutdown, code owners.
 set -u
-BIN=${BIN:-${CARGO_TARGET_DIR:-target}/debug}
+BIN=${BIN:-${CARGO_TARGET_DIR:-$PWD/target}/debug}
 T=$(mktemp -d); export CAMBIUM_DATA=$T/data CAMBIUM_CACHE=$T/cache CAMBIUM_LOG=info
 P=${PORT:-7981}; export CAMBIUM_ADDR=127.0.0.1:$P CAMBIUM_SERVER=http://127.0.0.1:$P
 pass=0; fail=0

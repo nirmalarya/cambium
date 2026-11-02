@@ -5,7 +5,7 @@
 # Also drills SQLite -> Postgres (migration path). Needs the local test Postgres
 # (PGURL, default the throwaway container on 55432).
 set -u
-BIN=${BIN:-${CARGO_TARGET_DIR:-target}/release}
+BIN=${BIN:-${CARGO_TARGET_DIR:-$PWD/target}/release}
 PGBASE=${PGBASE:-postgres://cambium:cambiumtest@127.0.0.1:55432}
 PSQL(){ sudo docker exec -i cambium-pg psql -U cambium -d cambium -tAq "$@"; }
 T=$(mktemp -d); pass=0; fail=0
