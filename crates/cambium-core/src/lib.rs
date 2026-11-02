@@ -16,6 +16,7 @@ pub mod pipelines;
 pub mod review;
 pub mod s3;
 pub mod search;
+pub mod semantic;
 pub mod text;
 pub mod tokens;
 pub mod tree;

@@ -17,6 +17,8 @@ pub struct Review {
     /// approvals that still count (given on the current source head, not by the author)
     pub approvals: Vec<String>,
     pub required: i64,
+    /// what the change touches: docs, comments (comment/format-only code), or logic
+    pub kind: crate::semantic::ChangeKind,
     /// code-owner sets (from OWNERS files on the target branch) still lacking an approval
     pub owners_pending: Vec<String>,
 }
@@ -38,6 +40,19 @@ impl Engine {
     pub fn required_approvals(&self, repo: &str, name: &str) -> Result<i64> {
         Ok(self.db.one("SELECT required_approvals FROM protected_refs WHERE repo=?1 AND name=?2", p![repo, name])?.map_or(0, |r| r.i(0)))
     }
+    /// Approvals needed for a change of `kind` to `name`: protected refs may ask fewer
+    /// for docs-only or comment/format-only changes.
+    pub fn required_for(&self, repo: &str, name: &str, kind: crate::semantic::ChangeKind) -> Result<i64> {
+        let Some(r) =
+            self.db.one("SELECT required_approvals,trivial_approvals FROM protected_refs WHERE repo=?1 AND name=?2", p![repo, name])?
+        else {
+            return Ok(0);
+        };
+        Ok(match (kind, r.oi(1)) {
+            (crate::semantic::ChangeKind::Logic, _) | (_, None) => r.i(0),
+            (_, Some(t)) => t.min(r.i(0)),
+        })
+    }
     pub fn protected_refs(&self, repo: &str) -> Result<Vec<(String, i64)>> {
         Ok(self
             .db
@@ -45,6 +60,61 @@ impl Engine {
             .into_iter()
             .map(|r| (r.s(0), r.i(1)))
             .collect())
+    }
+    /// Approvals for trivial (docs/comment-only) changes, per protected ref.
+    pub fn trivial_rules(&self, repo: &str) -> Result<Vec<(String, Option<i64>)>> {
+        Ok(self
+            .db
+            .query("SELECT name,trivial_approvals FROM protected_refs WHERE repo=?1 ORDER BY name", p![repo])?
+            .into_iter()
+            .map(|r| (r.s(0), r.oi(1)))
+            .collect())
+    }
+    /// Set (Some) or clear (None) the approvals needed for docs/comment-only changes
+    /// to a protected ref. Same permission as protecting it.
+    pub fn set_trivial_approvals(&self, repo: &str, who: &Principal, name: &str, n: Option<i64>) -> Result<()> {
+        let az = self.authz(repo, who)?;
+        let owner = self.db.one("SELECT owner FROM repos WHERE name=?1", p![repo])?.and_then(|r| r.os(0));
+        let ok = if az.open() { owner.as_deref() == Some(who.user.as_str()) } else { az.can("", Perm::Admin) };
+        if !ok {
+            return Err(Error::Forbidden("admin on / (or the repo owner) to change review rules".into()));
+        }
+        if n.is_some_and(|x| !(0..=20).contains(&x)) {
+            return Err(Error::Bad("approvals must be 0..20".into()));
+        }
+        if self.required_approvals(repo, name)? == 0 {
+            return Err(Error::Bad(format!("{name} is not protected")));
+        }
+        self.db.exec("UPDATE protected_refs SET trivial_approvals=?1 WHERE repo=?2 AND name=?3", p![n, repo, name])?;
+        Ok(())
+    }
+    /// Kind of the change a review proposes (merge base of target and source vs source).
+    pub fn review_kind(&self, repo: &str, source: &str, target: &str) -> Result<crate::semantic::ChangeKind> {
+        use crate::semantic::{classify, classify_file};
+        let Some(t) = self.get_ref(repo, target)? else { return Ok(crate::semantic::ChangeKind::Logic) };
+        let base = self.merge_base(repo, &t, source)?.unwrap_or(t);
+        let (mb, ms) = (self.manifest(repo, &base)?, self.manifest(repo, source)?);
+        let text = |e: Option<&String>| -> Result<Option<String>> {
+            let Some(e) = e else { return Ok(None) };
+            let (b, mode) = crate::engine::split_entry(e);
+            if mode == crate::engine::MODE_LINK || self.blob_size(b)? > 1 << 20 {
+                return Ok(None);
+            }
+            Ok(self.blobs.get(b)?.and_then(|d| String::from_utf8(d).ok()))
+        };
+        let mut kinds = vec![];
+        for p in mb.keys().chain(ms.keys()).collect::<std::collections::BTreeSet<_>>() {
+            let (a, b) = (mb.get(p), ms.get(p));
+            if a == b {
+                continue;
+            }
+            // a mode change (e.g. +x) is never trivial
+            let mode_changed = a.zip(b).is_some_and(|(x, y)| crate::engine::split_entry(x).1 != crate::engine::split_entry(y).1);
+            let k =
+                if mode_changed { crate::semantic::ChangeKind::Logic } else { classify_file(p, text(a)?.as_deref(), text(b)?.as_deref()) };
+            kinds.push(k);
+        }
+        Ok(classify(kinds))
     }
     /// Protect a branch (n >= 1) or lift protection (n = 0). Repo admins only
     /// (the owner while the repo has no permission rules).
@@ -113,10 +183,13 @@ impl Engine {
             state: r.s(6),
             created_at: r.i(7),
             approvals,
-            required: self.required_approvals(repo, &r.s(3))?,
+            kind: crate::semantic::ChangeKind::Logic,
+            required: 0,
             owners_pending: vec![],
         })
         .and_then(|mut rv| {
+            rv.kind = if rv.state == "open" { self.review_kind(repo, &rv.source, &rv.target)? } else { crate::semantic::ChangeKind::Logic };
+            rv.required = self.required_for(repo, &rv.target, rv.kind)?;
             rv.owners_pending = self.owners_pending(&rv)?;
             Ok(rv)
         })

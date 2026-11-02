@@ -760,3 +760,43 @@ fn revert_undoes_a_changeset_on_top_of_later_work() {
     assert!(!e.manifest("r", &r).unwrap().contains_key("new"));
     assert!(e.revert("r", &bad, "main", "bot", &|_| Ok(())).is_err(), "nothing left to revert");
 }
+
+#[test]
+fn semantic_review_rules() {
+    use cambium_core::{semantic::ChangeKind, Principal};
+    let (e, _d) = eng();
+    let root = e.create_repo("r", "alice").unwrap();
+    let base = e
+        .commit(
+            "r",
+            "main",
+            &root,
+            "alice",
+            "base",
+            vec![put(&e, "src/a.rs", "fn f() -> u8 { 1 } // one\nconst U: &str = \"http://a\";\n"), put(&e, "README.md", "hi\n")],
+        )
+        .unwrap()
+        .id;
+    let alice = Principal::new("alice");
+    e.set_protected("r", &alice, "main", 2).unwrap();
+    assert!(e.set_trivial_approvals("r", &Principal::new("mallory"), "main", Some(0)).is_err(), "admins only");
+    e.set_trivial_approvals("r", &alice, "main", Some(1)).unwrap();
+    let review = |files: Vec<FileChange>| {
+        let d = e.create_changeset("r", vec![base.clone()], "alice", "d", files).unwrap().id;
+        let id = e.create_review("r", &d, "main", "t", "alice").unwrap();
+        let rv = e.review("r", id).unwrap();
+        (rv.kind, rv.required)
+    };
+    assert_eq!(review(vec![put(&e, "README.md", "hello\n")]), (ChangeKind::Docs, 1));
+    assert_eq!(
+        review(vec![put(&e, "src/a.rs", "fn f() -> u8 {\n    1 // the one\n}\nconst U: &str = \"http://a\";\n")]),
+        (ChangeKind::Comments, 1)
+    );
+    // a real change hiding in a string that looks like a comment
+    assert_eq!(review(vec![put(&e, "src/a.rs", "fn f() -> u8 { 1 } // one\nconst U: &str = \"http://evil\";\n")]), (ChangeKind::Logic, 2));
+    // docs + logic together is logic
+    assert_eq!(review(vec![put(&e, "README.md", "x\n"), put(&e, "src/b.rs", "fn g() {}\n")]), (ChangeKind::Logic, 2));
+    // without a trivial rule, everything needs the full count
+    e.set_trivial_approvals("r", &alice, "main", None).unwrap();
+    assert_eq!(review(vec![put(&e, "README.md", "bye\n")]), (ChangeKind::Docs, 2));
+}

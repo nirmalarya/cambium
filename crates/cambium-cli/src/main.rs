@@ -782,6 +782,7 @@ const HELP: &str = "cmb - thin client for a Cambium server
   cmb acl rm <prefix> <principal>       remove a rule
   cmb review create -m <title> [--target main]
                                        ask for review of the current branch
+  cmb protect <branch> <n> [--trivial N|off]  need n approvals (N for docs/comment-only changes)
   cmb review update <n>                 point review <n> at your current drafts (old approvals lapse)
   cmb review [list] | show <n> | comment <n> <text> | approve <n> | merge <n> | close <n>
   cmb protect [<branch> <approvals>]    require N approvals (by others) to change a branch
@@ -1188,16 +1189,24 @@ fn run_wc(cmd: &str, mut args: Vec<String>, c: &Client, root: &Path, s: &mut Sta
             print!("{}", v["diff"].as_str().unwrap());
         }
         "protect" => {
-            // cmb protect <branch> <approvals>   (0 lifts protection); cmb protect = list
+            // cmb protect <branch> <approvals> [--trivial N|off]   (0 lifts protection); cmb protect = list
+            let trivial = flag(&mut args, "--trivial");
             if args.is_empty() {
                 for p in c.get(&format!("/v1/repos/{repo}/protected"), &[]).as_array().unwrap() {
-                    println!("{:<20} {} approval(s)", p[0].as_str().unwrap(), p[1]);
+                    let t = p[2].as_i64().map(|t| format!(" ({t} for docs/comment-only changes)")).unwrap_or_default();
+                    println!("{:<20} {} approval(s){t}", p[0].as_str().unwrap(), p[1]);
                 }
                 return;
             }
-            let n: i64 = args.get(1).and_then(|v| v.parse().ok()).unwrap_or_else(|| die("usage: cmb protect <branch> <approvals>"));
-            c.post(&format!("/v1/repos/{repo}/protected"), json!({"ref": args[0], "approvals": n}));
-            println!("{} now needs {n} approval(s) to change", args[0]);
+            let n: i64 = args
+                .get(1)
+                .and_then(|v| v.parse().ok())
+                .unwrap_or_else(|| die("usage: cmb protect <branch> <approvals> [--trivial N|off]"));
+            let t: Option<i64> =
+                trivial.map(|t| if t == "off" { -1 } else { t.parse().unwrap_or_else(|_| die("--trivial takes a number or off")) });
+            c.post(&format!("/v1/repos/{repo}/protected"), json!({"ref": args[0], "approvals": n, "trivial_approvals": t}));
+            let extra = t.filter(|t| *t >= 0).map(|t| format!(" ({t} for docs/comment-only changes)")).unwrap_or_default();
+            println!("{} now needs {n} approval(s) to change{extra}", args[0]);
         }
         "review" => {
             let sub = if args.is_empty() { "list".to_string() } else { args.remove(0) };
@@ -1219,7 +1228,7 @@ fn run_wc(cmd: &str, mut args: Vec<String>, c: &Client, root: &Path, s: &mut Sta
                     println!("review #{n} now at {} (earlier approvals no longer count)", short(&src));
                 }
                 "list" => for r in c.get(&format!("/v1/repos/{repo}/reviews"), &[]).as_array().unwrap() {
-                    println!("#{:<4} {:<7} {}/{} {} -> {}  {}  ({})", r["id"], r["state"].as_str().unwrap(), r["approvals"].as_array().unwrap().len(), r["required"],
+                    println!("#{:<4} {:<7} {:<8} {}/{} {} -> {}  {}  ({})", r["id"], r["state"].as_str().unwrap(), r["kind"].as_str().unwrap_or(""), r["approvals"].as_array().unwrap().len(), r["required"],
                         r["source"].as_str().unwrap(), r["target"].as_str().unwrap(), r["title"].as_str().unwrap(), r["author"].as_str().unwrap());
                 },
                 "show" => {

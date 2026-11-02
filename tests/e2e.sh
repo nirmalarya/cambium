@@ -138,6 +138,10 @@ ok "W14 UI approve" '[ "$(curl -s -o /dev/null -w %{http_code} -b "$CK" -d csrf=
 ok "W15 UI merge lands the review on main" '[ "$(curl -s -o /dev/null -w %{http_code} -b "$CK" -d csrf=$CSRF $U/rev/reviews/1/merge)" = 303 ] && cmb review list | grep -q "^#1 *merged" && cmb sync >/dev/null 2>&1 && grep -q direct a.txt && ! cmb status | grep -q drafts'
 ok "W16 review show (CLI) includes the comment" 'cmb review show 1 | grep -q "bob: nice"'
 ok "W17 UI cookie holds a server-side session id, never the API token" 'echo "$CK" | grep -q "^cambium_session=cmbs_" && ! grep -qi "$BOB" $T/h'
+# semantic review rules: docs/comment-only changes may need fewer approvals
+(cd $T && cmb init sem sm >/dev/null 2>&1 && cd sm && printf "fn f() -> u8 { 1 }\n" > lib.rs && echo hi > README.md && cmb add lib.rs README.md >/dev/null && cmb commit -m base >/dev/null && cmb protect main 2 --trivial 1 >/dev/null)
+ok "W30 protection lists the docs/comment-only rule" '(cd $T/sm && cmb protect | grep -q "main .*2 approval(s) (1 for docs/comment-only changes)")'
+ok "W31 comment-only review needs 1 approval, logic needs 2" '(cd $T/sm && printf "fn f() -> u8 {\n    1 // one\n}\n" > lib.rs && cmb add lib.rs >/dev/null && cmb commit --draft -m cmt >/dev/null && N=$(cmb review create -m comments | sed -n "s/^review #\([0-9]*\).*/\1/p") && cmb review list | grep -q "^#$N .*comments *0/1" && printf "fn f() -> u8 { 2 }\n" > lib.rs && cmb add lib.rs >/dev/null && cmb commit --draft -m logic >/dev/null && cmb review update $N >/dev/null && cmb review list | grep -q "^#$N .*logic *0/2")'
 ok "W18 UI sends security headers" 'curl -s -D - -o /dev/null -b "$CK" $U/rev | tr -d "\r" | grep -qi "^content-security-policy: default-src .none." && curl -s -D - -o /dev/null $U/login | grep -qi "^x-frame-options: DENY"'
 ok "W19 sign-out ends the session server-side" 'curl -s -o /dev/null -b "$CK" -X POST $U/logout && [ "$(curl -s -o /dev/null -w %{http_code} -b "$CK" $U/rev)" = 303 ]'
 

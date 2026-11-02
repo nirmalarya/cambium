@@ -27,7 +27,7 @@ pub const TABLES: &[(&str, &str, &str)] = &[
     ("reviews", "id,repo,source,target,title,author,state,created_at", "id"),
     ("review_comments", "id,review_id,author,path,body,created_at", "id"),
     ("review_approvals", "review_id,user_name,head,created_at,groups", "review_id,user_name"),
-    ("protected_refs", "repo,name,required_approvals", "repo,name"),
+    ("protected_refs", "repo,name,required_approvals,trivial_approvals", "repo,name"),
     ("blob_meta", "blob,size", "blob"),
     ("blob_uploads", "blob,principal,created_at", "blob,principal"),
     ("trees", "id,body", "id"),

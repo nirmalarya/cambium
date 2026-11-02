@@ -12,7 +12,7 @@ use axum::{
 };
 use cambium_core::{blob::hash_bytes, engine::Manifest, Error, Perm, Principal};
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
 
 // ---------------- JSON API ----------------
 #[derive(Deserialize)]
@@ -38,6 +38,14 @@ pub struct NewComment {
 pub struct Protect {
     r#ref: String,
     approvals: i64,
+    /// approvals for docs/comment-only changes; a negative value clears the rule
+    #[serde(default)]
+    trivial_approvals: Option<i64>,
+}
+/// [name, approvals, approvals for docs/comment-only changes (or null)]
+fn protection_list(st: &St, r: &str) -> Result<Value, ApiErr> {
+    let trivial: std::collections::HashMap<String, Option<i64>> = st.trivial_rules(r)?.into_iter().collect();
+    Ok(json!(st.protected_refs(r)?.into_iter().map(|(n, a)| json!([n, a, trivial.get(&n).copied().flatten()])).collect::<Vec<_>>()))
 }
 
 fn reader(st: &St, h: &HeaderMap, r: &str) -> Result<(Principal, cambium_core::Authz), ApiErr> {
@@ -124,11 +132,14 @@ async fn close(State(st): State<St>, h: HeaderMap, Path((r, id)): Path<(String, 
 async fn protect(State(st): State<St>, h: HeaderMap, Path(r): Path<String>, Json(b): Json<Protect>) -> R {
     let u = user(&st, &h)?;
     st.set_protected(&r, &u, &b.r#ref, b.approvals)?;
-    Ok(Json(json!(st.protected_refs(&r)?)))
+    if let (Some(t), true) = (b.trivial_approvals, b.approvals > 0) {
+        st.set_trivial_approvals(&r, &u, &b.r#ref, (t >= 0).then_some(t))?;
+    }
+    Ok(Json(protection_list(&st, &r)?))
 }
 async fn protected(State(st): State<St>, h: HeaderMap, Path(r): Path<String>) -> R {
     reader(&st, &h, &r)?;
-    Ok(Json(json!(st.protected_refs(&r)?)))
+    Ok(Json(protection_list(&st, &r)?))
 }
 
 pub fn api() -> Router<St> {
@@ -414,13 +425,14 @@ async fn review_page(State(st): State<St>, h: HeaderMap, Path((r, id)): Path<(St
         String::new()
     };
     page(&format!("#{id} {}", rv.title), Some(&u.user), &format!(r#"<div class=card><h2>#{id} {t}</h2>
-<p><code>{s}</code> → <code>{tg}</code> by <b>{a}</b> · <span class="badge {sb}">{state}</span> · approvals <b>{n}/{req}</b> {who}</p>{owners}{actions}</div>
+<p><code>{s}</code> → <code>{tg}</code> by <b>{a}</b> · <span class="badge {sb}">{state}</span> · <span class=badge>{kind}</span> · approvals <b>{n}/{req}</b> {who}</p>{owners}{actions}</div>
 <div class=card><h3>Changes</h3><pre class=diff>{d}</pre></div>
 <h3>Comments</h3>{comments}
 <div class=card><form method=post action="/ui/{rn}/reviews/{id}/comments"><input type=hidden name=csrf value="{c}">
 <input name=path placeholder="file (optional)" size=40><textarea name=body required placeholder="Comment"></textarea><button>Comment</button></form></div>"#,
         t = esc(&rv.title), s = esc(&rv.source), tg = esc(&rv.target), a = esc(&rv.author), state = esc(&rv.state),
         sb = if rv.state == "merged" { "ok" } else { "" }, n = rv.approvals.len(), req = rv.required,
+        kind = match rv.kind { cambium_core::semantic::ChangeKind::Docs => "docs only", cambium_core::semantic::ChangeKind::Comments => "comments/format only", cambium_core::semantic::ChangeKind::Logic => "logic" },
         who = if rv.approvals.is_empty() { String::new() } else { format!("({})", esc(&rv.approvals.join(", "))) },
         owners = if rv.owners_pending.is_empty() { String::new() } else {
             format!("<p class=owners>Code-owner approval needed: {}</p>", rv.owners_pending.iter().map(|o| format!("<code>{}</code>", esc(o))).collect::<Vec<_>>().join(", ")) },
