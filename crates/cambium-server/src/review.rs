@@ -144,7 +144,7 @@ button{{font:inherit;background:#1d5c45;color:#fff;border:0;border-radius:4px;pa
             .unwrap_or_default()
     ))
 }
-fn cookie_token(h: &HeaderMap) -> Option<String> {
+pub(crate) fn cookie_token(h: &HeaderMap) -> Option<String> {
     h.get_all(header::COOKIE)
         .iter()
         .filter_map(|v| v.to_str().ok())

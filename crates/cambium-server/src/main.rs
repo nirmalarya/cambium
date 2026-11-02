@@ -202,20 +202,27 @@ async fn get_blob(State(st): State<St>, h: HeaderMap, Path(id): Path<String>) ->
     }
 }
 
-/// Per-token request limiting. Keyed by the token's hash (or "anonymous");
-/// over the limit -> 429 with Retry-After in whole seconds.
-async fn limit(State(l): State<Arc<RateLimiter>>, req: Request, next: Next) -> Response {
+/// Request limiting. Authenticated callers get one bucket per user (however many
+/// tokens they hold); requests without a valid credential share one bucket per
+/// client IP, so made-up tokens cannot buy fresh budget and floods of bad
+/// credentials are refused here, before they reach auth or the audit log.
+/// Over the limit -> 429 with Retry-After in whole seconds.
+async fn limit(State((st, l)): State<(St, Arc<RateLimiter>)>, req: Request, next: Next) -> Response {
     if matches!(req.uri().path(), "/v1/health" | "/healthz" | "/readyz" | "/metrics") || !l.enabled() {
         return next.run(req).await;
     }
-    // bucket per credential: API bearer token, or the review UI's session cookie
-    let key = req
-        .headers()
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .or_else(|| req.headers().get("cookie").and_then(|v| v.to_str().ok()).filter(|c| c.contains("cambium_session=")))
-        .map(|t| cambium_core::blob::hash_bytes(t.as_bytes()))
-        .unwrap_or_else(|| "anonymous".into());
+    let h = req.headers();
+    let who = match h.get("authorization").and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer ")) {
+        Some(t) => auth::authenticate(&st.eng, st.oidc.as_ref(), t).ok(),
+        None => review::cookie_token(h).and_then(|t| st.session_principal(&t).ok()),
+    };
+    let key = match who {
+        Some(p) => format!("user:{}", p.user),
+        None => {
+            let ip = req.extensions().get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|c| c.0.ip());
+            ip.map(cambium_core::limits::ip_key).unwrap_or_else(|| "ip:unknown".into())
+        }
+    };
     match l.check(&key) {
         Ok(()) => next.run(req).await,
         Err(wait) => {
@@ -548,7 +555,7 @@ pub fn app(st: St, lim: Arc<RateLimiter>) -> Router {
         .merge(review::api())
         .merge(review::ui())
         .layer(middleware::from_fn_with_state(st.clone(), idempotent))
-        .layer(middleware::from_fn_with_state(lim, limit))
+        .layer(middleware::from_fn_with_state((st.clone(), lim), limit))
         .layer(DefaultBodyLimit::max(max_body()))
         .layer(tower_http::timeout::TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, timeout))
         .layer(middleware::from_fn_with_state(st.clone(), obs::observe))
@@ -677,7 +684,7 @@ async fn serve(ctx: Arc<Ctx>, data: String) {
         json!({"addr": addr.to_string(), "data": data, "tls": tls_enabled(), "rate_per_s": rate, "burst": burst,
         "max_body_mb": env_u64("CAMBIUM_MAX_BODY_MB", 64), "request_timeout_s": env_u64("CAMBIUM_REQUEST_TIMEOUT_S", 120), "version": env!("CARGO_PKG_VERSION")}),
     );
-    let svc = app.into_make_service();
+    let svc = app.into_make_service_with_connect_info::<std::net::SocketAddr>();
     if tls_enabled() {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let cfg = axum_server::tls_rustls::RustlsConfig::from_pem_file(
@@ -809,6 +816,26 @@ mod tests {
         assert_eq!(app.clone().oneshot(get("/v1/repos/r/refs", &other, None)).await.unwrap().status(), 200, "other token unaffected");
         let h = Req::get("/v1/health").body(Body::empty()).unwrap();
         assert_eq!(app.oneshot(h).await.unwrap().status(), 200, "health exempt");
+    }
+
+    /// Made-up tokens share one unauthenticated bucket instead of getting a fresh one each,
+    /// and several tokens for one user share that user's bucket.
+    #[tokio::test]
+    async fn rate_limit_keyed_by_user_not_raw_token() {
+        let (app, t, e, _d) = setup(0.001, 2.0);
+        e.create_repo("r", "alice").unwrap();
+        for i in 0..2 {
+            let fake = format!("cmbt_fake{i}");
+            assert_eq!(app.clone().oneshot(get("/v1/repos/r/refs", &fake, None)).await.unwrap().status(), 401);
+        }
+        let r = app.clone().oneshot(get("/v1/repos/r/refs", "cmbt_fake_new", None)).await.unwrap();
+        assert_eq!(r.status(), 429, "a new fake token must not get a fresh bucket");
+        // a real user is not blocked by someone else's bad requests
+        assert_eq!(app.clone().oneshot(get("/v1/repos/r/refs", &t, None)).await.unwrap().status(), 200);
+        // a second token for alice shares alice's bucket
+        let t2 = e.create_token("alice").unwrap();
+        assert_eq!(app.clone().oneshot(get("/v1/repos/r/refs", &t2, None)).await.unwrap().status(), 200);
+        assert_eq!(app.oneshot(get("/v1/repos/r/refs", &t2, None)).await.unwrap().status(), 429);
     }
 
     // ---------- OIDC + per-directory permissions over HTTP ----------
