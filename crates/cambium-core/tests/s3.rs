@@ -121,14 +121,14 @@ fn s3_put_get_has_roundtrip() {
     let data = b"hello object store\n".repeat(100);
     let id = st.put(&data).unwrap();
     assert_eq!(id, hash_bytes(&data));
-    assert!(st.has(&id));
+    assert!(st.has(&id).unwrap());
     assert_eq!(st.get(&id).unwrap().unwrap(), data);
     // stored compressed under the prefix
     let stored = f.objects.lock().unwrap()[&format!("/cambium-bucket/blobs/{id}")].clone();
     assert!(stored.len() < data.len());
     // missing and malformed ids
     assert!(st.get(&"0".repeat(64)).unwrap().is_none());
-    assert!(!st.has("../etc/passwd"));
+    assert!(!st.has("../etc/passwd").unwrap());
     assert!(st.get("zz").unwrap().is_none());
     // idempotent put
     assert_eq!(st.put(&data).unwrap(), id);
@@ -141,6 +141,8 @@ fn s3_wrong_secret_is_rejected() {
     let st = S3BlobStore::new(cfg(&f, "wrong"));
     assert!(st.put(b"x").is_err());
     assert!(*f.rejected.lock().unwrap() > 0);
+    // a storage error (here 403) is reported, never mistaken for "blob absent"
+    assert!(st.has(&"a".repeat(64)).is_err());
 }
 
 #[test]

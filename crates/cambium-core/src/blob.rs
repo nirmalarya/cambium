@@ -16,8 +16,9 @@ pub fn ct_eq(a: &str, b: &str) -> bool {
 pub trait BlobStore: Send + Sync {
     fn put(&self, data: &[u8]) -> std::io::Result<String>;
     fn get(&self, id: &str) -> std::io::Result<Option<Vec<u8>>>;
-    fn has(&self, id: &str) -> bool {
-        matches!(self.get(id), Ok(Some(_)))
+    /// Whether the blob exists. Storage errors are errors, not "absent".
+    fn has(&self, id: &str) -> std::io::Result<bool> {
+        Ok(self.get(id)?.is_some())
     }
 }
 
@@ -99,8 +100,8 @@ impl BlobStore for FsBlobStore {
         Ok(Some(out))
     }
     /// Existence only: no read or decompression.
-    fn has(&self, id: &str) -> bool {
-        valid_id(id) && self.path(id).exists()
+    fn has(&self, id: &str) -> std::io::Result<bool> {
+        Ok(valid_id(id) && self.path(id).try_exists()?)
     }
 }
 
@@ -119,7 +120,7 @@ impl BlobStore for MemBlobStore {
     fn get(&self, id: &str) -> std::io::Result<Option<Vec<u8>>> {
         Ok(self.m.lock().unwrap().get(id).cloned())
     }
-    fn has(&self, id: &str) -> bool {
-        self.m.lock().unwrap().contains_key(id)
+    fn has(&self, id: &str) -> std::io::Result<bool> {
+        Ok(self.m.lock().unwrap().contains_key(id))
     }
 }

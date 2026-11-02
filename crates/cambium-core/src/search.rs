@@ -106,7 +106,14 @@ impl Engine {
         let mut paths: Vec<(&String, &str)> =
             m.iter().map(|(p, e)| (p, split_entry(e).0)).filter(|(_, b)| cand.as_ref().is_none_or(|c| c.contains(*b))).collect();
         paths.sort();
-        for (path, b) in paths {
+        // No indexed token narrowed the candidates: very short queries match paths
+        // only, others scan a bounded number of files instead of every blob.
+        let cap = match &cand {
+            Some(_) => usize::MAX,
+            None if ql.chars().count() < 3 => 0,
+            None => 5000,
+        };
+        for (path, b) in paths.into_iter().take(cap) {
             let data = self.blobs.get(b)?.unwrap_or_default();
             if data.contains(&0) {
                 continue;

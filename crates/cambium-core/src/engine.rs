@@ -239,6 +239,8 @@ impl Engine {
         // databases from older versions: add columns before the schema's new indexes run
         let has = |t: &str, col: &str| c.prepare(&format!("SELECT {col} FROM {t} LIMIT 0")).is_ok();
         let existed = has("changesets", "id");
+        // indexes are backfilled only for databases that predate them, not on every start
+        let had_history = has("path_history", "cs_id");
         let mut need_gen = false;
         if existed {
             for (t, col, ddl) in [
@@ -259,7 +261,7 @@ impl Engine {
         let mut c = c;
         crate::migrate::run(&mut c)?;
         let e = Self { db: Db::Sqlite(std::sync::Mutex::new(c)), blobs };
-        if need_gen || existed {
+        if need_gen || (existed && !had_history) {
             e.backfill_indexes()?;
         }
         Ok(e)
@@ -416,7 +418,7 @@ impl Engine {
                 return Err(Error::Bad(format!("unsupported mode {:o} for {}", f.mode, f.path)));
             }
             if let Some(b) = &f.blob {
-                if !self.blobs.has(b) {
+                if !self.blobs.has(b)? {
                     return Err(Error::Bad(format!("missing blob {b}")));
                 }
             }
@@ -1034,6 +1036,10 @@ impl Engine {
         let head = self.get_ref(repo, branch)?.ok_or_else(|| Error::NotFound(format!("ref {branch}")))?;
         let onto_id = self.resolve(repo, onto)?;
         let base = self.merge_base(repo, &head, &onto_id)?.ok_or_else(|| Error::Bad("no common ancestor".into()))?;
+        if base == onto_id {
+            // already on top of `onto`: nothing to replay, keep the head (and its approvals)
+            return Ok(head);
+        }
         let mut todo = vec![];
         let mut cur = head.clone();
         while cur != base {
@@ -1056,6 +1062,18 @@ impl Engine {
         }
         self.cas_ref(repo, branch, Some(&head), Some(&tip))?;
         Ok(tip)
+    }
+
+    /// Remove a repository and everything that hangs off it (used to undo a failed
+    /// import). Blobs stay: they are content-addressed and may be shared.
+    pub fn discard_repo(&self, repo: &str) -> Result<()> {
+        let r = repo.to_string();
+        self.db.tx(move |t| {
+            t.exec("DELETE FROM refs WHERE repo=?1", &p![&r])?;
+            t.exec("DELETE FROM path_history WHERE repo=?1", &p![&r])?;
+            t.exec("DELETE FROM repos WHERE name=?1", &p![&r])?;
+            Ok(())
+        })
     }
 
     pub fn wal_len(&self, repo: &str) -> Result<i64> {

@@ -112,3 +112,28 @@ fn imports_full_history_with_branches_merges_and_modes() {
     // re-importing into the same name is refused rather than merged
     assert!(e.import_git(&r, "imp", "alice").is_err());
 }
+
+#[test]
+fn disallowed_paths_are_skipped_and_failed_imports_can_be_retried() {
+    let d = tempfile::tempdir().unwrap();
+    let src = d.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    g(&src, &["init", "-q"], 1_700_000_000);
+    w(&src, "ok.txt", "fine\n");
+    w(&src, ".cambium/state.json", "{}\n");
+    #[cfg(unix)]
+    w(&src, "back\\slash.txt", "odd\n");
+    g(&src, &["add", "-A"], 1_700_000_000);
+    g(&src, &["commit", "-qm", "c1"], 1_700_000_000);
+
+    let e = Engine::open(d.path().join("t.db").to_str().unwrap(), Arc::new(MemBlobStore::default())).unwrap();
+    // a failed import (not a git repo) leaves nothing behind...
+    assert!(e.import_git(&d.path().join("missing"), "r", "u").is_err());
+    // ...so the same name can be imported right after
+    let rep = e.import_git(&src, "r", "u").unwrap();
+    assert_eq!(rep.commits, 1);
+    assert!(rep.skipped.iter().any(|s| s.contains(".cambium/state.json")), "{:?}", rep.skipped);
+    let main = e.get_ref("r", "main").unwrap().unwrap();
+    let m = e.manifest("r", &main).unwrap();
+    assert!(m.contains_key("ok.txt") && !m.keys().any(|k| k.starts_with(".cambium")));
+}

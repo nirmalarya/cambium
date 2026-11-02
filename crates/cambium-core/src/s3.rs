@@ -143,7 +143,7 @@ impl S3BlobStore {
 impl BlobStore for S3BlobStore {
     fn put(&self, data: &[u8]) -> std::io::Result<String> {
         let id = hash_bytes(data);
-        if self.has(&id) {
+        if self.has(&id)? {
             return Ok(id);
         }
         let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
@@ -170,8 +170,15 @@ impl BlobStore for S3BlobStore {
             Err(e) => Err(io(e)),
         }
     }
-    fn has(&self, id: &str) -> bool {
-        valid_id(id) && self.request("HEAD", id, b"").is_ok()
+    fn has(&self, id: &str) -> std::io::Result<bool> {
+        if !valid_id(id) {
+            return Ok(false);
+        }
+        match self.request("HEAD", id, b"") {
+            Ok(_) => Ok(true),
+            Err(ureq::Error::Status(404, _)) => Ok(false),
+            Err(e) => Err(io(e)),
+        }
     }
 }
 

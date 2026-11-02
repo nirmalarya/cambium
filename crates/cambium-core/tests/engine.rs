@@ -552,14 +552,14 @@ fn fs_blob_store_concurrent_puts_and_integrity() {
     let ids: Vec<String> = hs.into_iter().map(|h| h.join().unwrap()).collect();
     assert!(ids.windows(2).all(|w| w[0] == w[1]));
     assert_eq!(s.get(&ids[0]).unwrap().unwrap(), data, "object complete after racing uploads");
-    assert!(s.has(&ids[0]) && !s.has(&"0".repeat(64)));
+    assert!(s.has(&ids[0]).unwrap() && !s.has(&"0".repeat(64)).unwrap());
     // no temp files left behind
     let sub = d.path().join(&ids[0][..2]);
     assert_eq!(std::fs::read_dir(&sub).unwrap().count(), 1);
     // a corrupted object is refused, moved aside, and healed by the next upload
     std::fs::write(sub.join(&ids[0]), b"garbage").unwrap();
     assert!(s.get(&ids[0]).is_err());
-    assert!(!s.has(&ids[0]));
+    assert!(!s.has(&ids[0]).unwrap());
     s.put(&data).unwrap();
     assert_eq!(s.get(&ids[0]).unwrap().unwrap(), data);
 }
@@ -602,4 +602,33 @@ fn symlink_targets_conflict_instead_of_merging() {
     e.commit("r", "feat", &base, "u", "f", vec![link("A\nb\nc\n")]).unwrap();
     e.commit("r", "main", &base, "u", "m", vec![link("a\nb\nC\n")]).unwrap();
     assert!(matches!(e.merge("r", "main", "feat", "u"), Err(Error::Conflict(_))));
+}
+
+#[test]
+fn rebase_when_already_on_top_keeps_head() {
+    let (e, _d) = eng();
+    let root = e.create_repo("r", "u").unwrap();
+    let m = e.commit("r", "main", &root, "u", "m", vec![put(&e, "a", "1\n")]).unwrap().id;
+    e.cas_ref("r", "feat", None, Some(&m)).unwrap();
+    let f = e.commit("r", "feat", &m, "u", "f", vec![put(&e, "b", "1\n")]).unwrap().id;
+    assert_eq!(e.rebase("r", "feat", "main").unwrap(), f, "no new changesets when nothing to replay");
+    assert_eq!(e.get_ref("r", "feat").unwrap(), Some(f));
+}
+#[test]
+fn reopening_does_not_rewrite_indexes() {
+    let d = tempfile::tempdir().unwrap();
+    let path = d.path().join("t.db");
+    {
+        let e = Engine::open(path.to_str().unwrap(), Arc::new(MemBlobStore::default())).unwrap();
+        let root = e.create_repo("r", "u").unwrap();
+        e.commit("r", "main", &root, "u", "one", vec![put(&e, "a", "1\n")]).unwrap();
+    }
+    // corrupt a generation number; a reopen must not "fix" it (proves no full rewrite)
+    let c = rusqlite::Connection::open(&path).unwrap();
+    c.execute("UPDATE changesets SET gen=42", []).unwrap();
+    drop(c);
+    let _e = Engine::open(path.to_str().unwrap(), Arc::new(MemBlobStore::default())).unwrap();
+    let c = rusqlite::Connection::open(&path).unwrap();
+    let g: i64 = c.query_row("SELECT max(gen) FROM changesets", [], |r| r.get(0)).unwrap();
+    assert_eq!(g, 42);
 }

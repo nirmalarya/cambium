@@ -179,8 +179,20 @@ async fn cas(State(st): State<St>, h: HeaderMap, Path((r, name)): Path<(String, 
     if !az.open() {
         match (&b.expected, &new) {
             (None, _) => need(az.can_any(Perm::Read), "read on this repo")?,
-            (Some(_), None) => {
-                need(if name == "main" { az.can("", Perm::Admin) } else { az.can_any(Perm::Write) }, "permission to delete this ref")?
+            (Some(old), None) => {
+                // deleting a branch discards its work: admins, or whoever may write every
+                // path where it differs from main
+                if !az.can("", Perm::Admin) {
+                    need(name != "main", "admin on / to delete main")?;
+                    let mb = match st.get_ref(&r, "main")? {
+                        Some(m) => st.manifest(&r, &m)?,
+                        None => Default::default(),
+                    };
+                    let mo = st.manifest(&r, &st.resolve(&r, old)?)?;
+                    let diff = Engine::changes_between(&mb, &mo);
+                    need(az.can_any(Perm::Write), "permission to delete this ref")?;
+                    check_writes(&az, &diff)?;
+                }
             }
             (Some(old), Some(n)) => {
                 let (mo, mn) = (st.manifest(&r, &st.resolve(&r, old)?)?, st.manifest(&r, n)?);
@@ -927,6 +939,26 @@ mod tests {
         assert_eq!(app.clone().oneshot(req("a")).await.unwrap().status(), 200);
         app.clone().oneshot(req("b")).await.unwrap();
         assert!(e.get_ref("b", "feat").unwrap().is_some(), "repo b got its own ref, not a replay of repo a");
+    }
+
+    /// Deleting a branch needs write on every path where it differs from main.
+    #[tokio::test]
+    async fn ref_delete_needs_write_on_branch_changes() {
+        let (app, alice, e, _d) = setup(0.0, 1.0);
+        let bob = e.create_token("bob").unwrap();
+        let root = e.create_repo("r", "alice").unwrap();
+        let a = Principal { user: "alice".into(), groups: vec![] };
+        e.set_acl("r", &a, "", "user:alice", Some(Perm::Admin)).unwrap();
+        e.set_acl("r", &a, "pub", "user:bob", Some(Perm::Write)).unwrap();
+        let fc = |p: &str| cambium_core::FileChange { path: p.into(), blob: Some(e.put_blob(p.as_bytes()).unwrap()), mode: cambium_core::engine::MODE_FILE };
+        e.cas_ref("r", "pay-work", None, Some(&root)).unwrap();
+        let pw = e.commit("r", "pay-work", &root, "alice", "pay", vec![fc("pay/x")]).unwrap().id;
+        e.cas_ref("r", "pub-work", None, Some(&root)).unwrap();
+        let bw = e.commit("r", "pub-work", &root, "alice", "pub", vec![fc("pub/x")]).unwrap().id;
+        let del = |name: &str, head: &str, tok: &str| post(&format!("/v1/repos/r/refs/{name}"), tok, json!({"expected": head, "new": null}));
+        assert_eq!(app.clone().oneshot(del("pay-work", &pw, &bob)).await.unwrap().status(), 403);
+        assert_eq!(app.clone().oneshot(del("pub-work", &bw, &bob)).await.unwrap().status(), 200);
+        assert_eq!(app.oneshot(del("pay-work", &pw, &alice)).await.unwrap().status(), 200);
     }
 
     // ---------- OIDC + per-directory permissions over HTTP ----------

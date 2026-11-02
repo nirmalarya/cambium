@@ -78,9 +78,17 @@ fn mode(m: &str) -> Option<u32> {
 }
 
 impl Engine {
-    /// Import `git_dir` into a new repository `repo` owned by `owner`.
+    /// Import `git_dir` into a new repository `repo` owned by `owner`. All or nothing:
+    /// if the import fails part-way, the half-built repo is removed so it can be retried.
     pub fn import_git(&self, git_dir: &Path, repo: &str, owner: &str) -> Result<ImportReport> {
         let root = self.create_repo(repo, owner)?;
+        self.import_into(git_dir, repo, &root).inspect_err(|e| {
+            crate::log::error("git import failed; removing the partial repo", serde_json::json!({"repo": repo, "error": e.to_string()}));
+            let _ = self.discard_repo(repo);
+        })
+    }
+    fn import_into(&self, git_dir: &Path, repo: &str, root: &str) -> Result<ImportReport> {
+        let root = root.to_string();
         let mut rep = ImportReport::default();
         let log =
             git(git_dir, &["log", "--topo-order", "--reverse", "--branches", "--tags", "--format=%H%x00%P%x00%an <%ae>%x00%at%x00%B%x1e"])?;
@@ -118,6 +126,11 @@ impl Engine {
                 }
                 let Some(path) = it.next() else { break };
                 let path = String::from_utf8_lossy(path).to_string();
+                if !crate::engine::valid_path(&path) {
+                    // git allows paths we do not (backslashes, a .cambium folder, ...)
+                    rep.skipped.push(format!("{} {path:?} (path not allowed)", &sha[..12]));
+                    continue;
+                }
                 let m: Vec<&str> = meta[1..].split_whitespace().collect();
                 let (new_mode, new_sha, status) = (m[1], m[3], m[4]);
                 if status == "D" {
