@@ -114,8 +114,55 @@ fn imports_full_history_with_branches_merges_and_modes() {
     // path history works on imported data
     let lp = e.log("imp", &main, Some("src/renamed.rs"), 10).unwrap();
     assert_eq!(lp.len(), 1);
-    // re-importing into the same name is refused rather than merged
-    assert!(e.import_git(&r, "imp", "alice").is_err());
+    // running again with nothing new imports nothing and moves nothing
+    let again = e.import_git(&r, "imp", "alice").unwrap();
+    assert_eq!((again.commits, again.refs.len()), (0, 0), "{again:?}");
+    assert_eq!(e.get_ref("imp", "main").unwrap(), Some(main.clone()));
+
+    // incremental: new git commits arrive while git is still in use
+    w(&r, "src/later.rs", "later\n");
+    g(&r, &["add", "-A"], 0);
+    g(&r, &["commit", "-qm", "later work"], 1_600_000_500);
+    let inc = e.import_git(&r, "imp", "alice").unwrap();
+    assert_eq!(inc.commits, 1);
+    let main2 = e.get_ref("imp", "main").unwrap().unwrap();
+    assert_eq!(e.get_changeset("imp", &main2).unwrap().parents, vec![main.clone()], "fast-forwarded");
+    assert!(e.manifest("imp", &main2).unwrap().contains_key("src/later.rs"));
+
+    // someone commits to main in Cambium; a later git commit must not overwrite it
+    let b = e.put_blob(b"x\n").unwrap();
+    let mine = e
+        .commit(
+            "imp",
+            "main",
+            &main2,
+            "bob",
+            "cambium work",
+            vec![cambium_core::FileChange { path: "c.txt".into(), blob: Some(b), mode: 0o100644 }],
+        )
+        .unwrap()
+        .id;
+    w(&r, "src/more.rs", "more\n");
+    g(&r, &["add", "-A"], 0);
+    g(&r, &["commit", "-qm", "more git work"], 1_600_000_600);
+    let div = e.import_git(&r, "imp", "alice").unwrap();
+    assert_eq!(div.commits, 1, "the commit itself is still imported");
+    assert!(div.skipped.iter().any(|s| s.contains("ref main (diverged")), "{:?}", div.skipped);
+    assert_eq!(e.get_ref("imp", "main").unwrap(), Some(mine), "Cambium work kept");
+}
+
+#[test]
+fn existing_repo_not_from_git_is_not_imported_into() {
+    let d = tempfile::tempdir().unwrap();
+    let e = Engine::open(d.path().join("t.db").to_str().unwrap(), Arc::new(MemBlobStore::default())).unwrap();
+    e.create_repo("r", "u").unwrap();
+    let src = d.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    g(&src, &["init", "-q"], 0);
+    w(&src, "a", "1\n");
+    g(&src, &["add", "-A"], 0);
+    g(&src, &["commit", "-qm", "c"], 1_600_000_000);
+    assert!(e.import_git(&src, "r", "u").is_err());
 }
 
 #[test]

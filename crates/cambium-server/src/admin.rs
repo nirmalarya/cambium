@@ -9,7 +9,7 @@
 //!   cmbd migrate [--status]                                         apply / show schema migrations
 //!   cmbd backup <dir>                                               metadata + blobs, consistent snapshot
 //!   cmbd restore <dir>                                              into an EMPTY database + blob store
-//!   cmbd import-git <git-dir> <repo> [owner]                        one-time import with history
+//!   cmbd import-git <git-dir> <repo> [owner]                        import with history; run again to add new commits
 //!
 //! Every command that changes state writes an audit event (actor `cli:<user>`).
 use cambium_core::audit::AuditEvent;

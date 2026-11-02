@@ -182,6 +182,8 @@ ok "I01 cmbd import-git imports every commit; refs only main and release/*" '$BI
 ok "I02 imported tree matches the Git checkout" 'cmb checkout gitimp gi >/dev/null 2>&1 && diff -r --exclude=.cambium --exclude=.git $G $T/gi && [ -x $T/gi/tool.sh ]'
 ok "I03 imported history and merge parents" '(cd $T/gi && cmb log | head -1 | grep -q "merged (merge)" && [ $(cmb log | wc -l) = 5 ])'
 ok "I04 blame works on imported history" '(cd $T/gi && [ $(cmb blame lib/a.txt | cut -d" " -f1 | sort -u | wc -l) = 2 ])'
+(cd $G && echo three > lib/c.txt && git add -A && git commit -qm four && echo four >> lib/c.txt && git commit -qam five)
+ok "I05 running import-git again imports only the new commits and fast-forwards main" '$BIN/cmbd import-git $G gitimp alice 2>/dev/null | grep -q "imported 2 commits" && (cd $T/gi && cmb sync >/dev/null 2>&1 && grep -q four lib/c.txt)'
 
 # ---------- regional read-through cache (cmbd edge) ----------
 EP=${EDGE_PORT:-7994}; E=http://127.0.0.1:$EP

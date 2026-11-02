@@ -1101,6 +1101,7 @@ impl Engine {
         self.db.tx(move |t| {
             t.exec("DELETE FROM refs WHERE repo=?1", &p![&r])?;
             t.exec("DELETE FROM path_history WHERE repo=?1", &p![&r])?;
+            t.exec("DELETE FROM git_import_map WHERE repo=?1", &p![&r])?;
             t.exec("DELETE FROM repos WHERE name=?1", &p![&r])?;
             Ok(())
         })

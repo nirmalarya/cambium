@@ -37,4 +37,4 @@ is silent, the choice made here is marked **(our choice)**.
 2. ✅ **Trees and fetch protocol** (done; `cmb mount` still uses the flat listing): content-hashed directory trees, a recursive fetch from the root tree, and the client and mount moved onto it.
 3. ✅ **Derived-data framework** (done: `Derive` trait, eager/deferred, versioned, iterative, `cmbd derive` backfill; skip lists live; blame still on its own cache): move manifests, blame and path history onto it; add skip lists.
 4. ✅ **Cache tiers** (done: `cmbd daemon` → `cmbd edge` → `cmbd`, blobs and complete trees cached, short-lived positive authz memo): per-node daemon and regional edge with strict tiering.
-5. **Review rules** ✅ (docs/comment-only classification, `cmb protect --trivial`), **bisect/revert APIs** ✅; still to do: incremental git ingestion, a simulation harness, `cmb mount` on trees.
+5. **Review rules** ✅ (docs/comment-only classification, `cmb protect --trivial`), **bisect/revert APIs** ✅; incremental git ingestion ✅; still to do: a simulation harness, `cmb mount` on trees.

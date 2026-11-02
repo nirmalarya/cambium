@@ -56,3 +56,10 @@ Derived data (skip lists today) is computed when a changeset is created. After a
 upgrade that adds or re-versions a derived type, backfill existing history with
 `cmbd derive` (idempotent; safe while the server is running). Missing values are also
 computed on first use, so the backfill only removes first-request latency.
+
+## Migrating from git (incremental)
+`cmbd import-git <git-dir> <repo> [owner]` imports full history. Run it again (e.g. from
+cron) while teams still push to git: only new commits are imported and `main` /
+`release/*` are fast-forwarded. Once people commit in Cambium, a ref that has diverged
+is left alone and reported as skipped; at that point git is no longer the source of
+truth for that ref. Only `main` and `release/*` refs are created.

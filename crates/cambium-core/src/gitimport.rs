@@ -80,20 +80,46 @@ fn mode(m: &str) -> Option<u32> {
 impl Engine {
     /// Import `git_dir` into a new repository `repo` owned by `owner`. All or nothing:
     /// if the import fails part-way, the half-built repo is removed so it can be retried.
+    ///
+    /// If `repo` already exists and was imported from git, only commits not yet
+    /// imported are added and `main`/`release/*` are fast-forwarded (incremental
+    /// migration: git stays live while teams move over). A ref that has diverged in
+    /// Cambium is left alone and reported.
     pub fn import_git(&self, git_dir: &Path, repo: &str, owner: &str) -> Result<ImportReport> {
+        let known: HashMap<String, String> = self
+            .db
+            .query("SELECT git_sha,cs_id FROM git_import_map WHERE repo=?1", crate::p![repo])?
+            .into_iter()
+            .map(|r| (r.s(0), r.s(1)))
+            .collect();
+        let exists = self.db.one("SELECT 1 FROM repos WHERE name=?1", crate::p![repo])?.is_some();
+        if exists {
+            if known.is_empty() {
+                return Err(Error::Bad(format!("repo {repo} exists and was not imported from git")));
+            }
+            let root = self.get_changeset(repo, &self.resolve(repo, "main")?)?.id; // only used for a source without main
+            return self.import_into(git_dir, repo, &root, known, true);
+        }
         let root = self.create_repo(repo, owner)?;
-        self.import_into(git_dir, repo, &root).inspect_err(|e| {
+        self.import_into(git_dir, repo, &root, known, false).inspect_err(|e| {
             crate::log::error("git import failed; removing the partial repo", serde_json::json!({"repo": repo, "error": e.to_string()}));
             let _ = self.discard_repo(repo);
         })
     }
-    fn import_into(&self, git_dir: &Path, repo: &str, root: &str) -> Result<ImportReport> {
+    fn import_into(
+        &self,
+        git_dir: &Path,
+        repo: &str,
+        root: &str,
+        known: HashMap<String, String>,
+        incremental: bool,
+    ) -> Result<ImportReport> {
         let root = root.to_string();
         let mut rep = ImportReport::default();
         let log =
             git(git_dir, &["log", "--topo-order", "--reverse", "--branches", "--tags", "--format=%H%x00%P%x00%an <%ae>%x00%at%x00%B%x1e"])?;
         let mut cat = Cat::new(git_dir)?;
-        let mut cs_of: HashMap<String, String> = HashMap::new();
+        let mut cs_of: HashMap<String, String> = known;
         let mut blob_of: HashMap<String, String> = HashMap::new();
         for rec in log.split(|b| *b == 0x1e) {
             let rec = String::from_utf8_lossy(rec);
@@ -106,6 +132,9 @@ impl Engine {
                 return Err(Error::Bad("unexpected git log output".into()));
             }
             let (sha, parents, author, ts) = (f[0], f[1], f[2], f[3].parse::<i64>().unwrap_or(0));
+            if cs_of.contains_key(sha) {
+                continue; // imported by an earlier run
+            }
             let mut msg = f[4].trim_end().to_string();
             let gp: Vec<&str> = parents.split_whitespace().collect();
             if gp.len() > 2 {
@@ -164,6 +193,10 @@ impl Engine {
                     .collect::<Result<_>>()?
             };
             let cs = self.create_changeset_at(repo, ps, author, &msg, files, ts)?;
+            self.db.exec(
+                "INSERT INTO git_import_map(repo,git_sha,cs_id) VALUES(?1,?2,?3) ON CONFLICT DO NOTHING",
+                crate::p![repo, sha, &cs.id],
+            )?;
             cs_of.insert(sha.to_string(), cs.id);
             rep.commits += 1;
         }
@@ -191,13 +224,24 @@ impl Engine {
                 continue;
             };
             let cur = self.get_ref(repo, &name)?;
+            if cur.as_deref() == Some(cs.as_str()) {
+                continue; // unchanged since the last run
+            }
+            if let Some(c) = &cur {
+                // move only along imported history; never over work done in Cambium
+                let imported = cs_of.values().any(|v| v == c);
+                if incremental && !(imported && self.is_ancestor(repo, c, cs)?) {
+                    rep.skipped.push(format!("ref {name} (diverged in Cambium; not moved)"));
+                    continue;
+                }
+            }
             match self.cas_ref(repo, &name, cur.as_deref(), Some(cs)) {
                 Ok(()) => rep.refs.push((name, cs.clone())),
                 Err(e) => rep.skipped.push(format!("ref {name}: {e}")),
             }
         }
-        // no `main` branch in the source: point main at the source's HEAD
-        if !rep.refs.iter().any(|(n, _)| n == "main") {
+        // no `main` branch in the source: point main at the source's HEAD (first run)
+        if !incremental && !rep.refs.iter().any(|(n, _)| n == "main") {
             if let Ok(h) = git(git_dir, &["rev-parse", "HEAD"]) {
                 if let Some(cs) = cs_of.get(String::from_utf8_lossy(&h).trim()) {
                     self.cas_ref(repo, "main", Some(&root), Some(cs))?;
