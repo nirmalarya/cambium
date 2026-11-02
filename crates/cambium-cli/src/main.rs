@@ -593,6 +593,14 @@ static TREES_REUSED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicU
 /// and only entering directories inside the sparse set. Returns (changeset, files,
 /// complete trees seen).
 fn fetch_tree(c: &Client, s: &State, target: &str) -> (String, BTreeMap<String, String>, BTreeMap<String, String>) {
+    let (cs, files, trees, _) = fetch_tree_sized(c, s, target);
+    (cs, files, trees)
+}
+/// `fetch_tree`, also returning each file's size (from the tree entries).
+/// (changeset, path -> entry, directory -> tree id, path -> size)
+type Fetched = (String, BTreeMap<String, String>, BTreeMap<String, String>, BTreeMap<String, u64>);
+fn fetch_tree_sized(c: &Client, s: &State, target: &str) -> Fetched {
+    let mut sizes = BTreeMap::new();
     let r = c.get(&format!("/v1/repos/{}/root/{target}", s.repo), &[]);
     let (cs, root) = (r["cs"].as_str().unwrap().to_string(), r["root"].as_str().unwrap().to_string());
     let reuse = s.trees_sparse == s.sparse;
@@ -636,13 +644,14 @@ fn fetch_tree(c: &Client, s: &State, target: &str) -> (String, BTreeMap<String, 
                             "link" => MODE_LINK,
                             _ => MODE_FILE,
                         };
+                        sizes.insert(p.clone(), e["size"].as_u64().unwrap_or(0));
                         files.insert(p, entry(&eid, mode));
                     }
                 }
             }
         }
     }
-    (cs, files, trees)
+    (cs, files, trees, sizes)
 }
 
 /// Bring the working copy to `target`, fetching only files inside the sparse set.
@@ -849,9 +858,10 @@ fn main() {
                 die("usage: cmb mount <repo> <dir> [--rev R] [--sparse a/,b/]");
             }
             let c = Client::from_env(None);
-            let t = c.post(&format!("/v1/repos/{}/tree", args[0]), json!({"rev": rev, "prefixes": sparse, "sizes": true}));
-            let entries: BTreeMap<String, String> = serde_json::from_value(t["entries"].clone()).unwrap();
-            let sizes: BTreeMap<String, u64> = serde_json::from_value(t["sizes"].clone()).unwrap_or_default();
+            // walk the tree protocol (cacheable at every tier); sizes come with the entries
+            let probe = State { repo: args[0].clone(), sparse: sparse.clone(), ..Default::default() };
+            #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+            let (cs, entries, _, sizes) = fetch_tree_sized(&c, &probe, &rev);
             #[cfg(target_os = "linux")]
             {
                 std::fs::create_dir_all(&args[1]).unwrap();
@@ -876,7 +886,7 @@ fn main() {
                     server: c.server.clone(),
                     repo: args[0].clone(),
                     branch: rev.clone(),
-                    head: t["cs"].as_str().unwrap_or("").into(),
+                    head: cs.clone(),
                     sparse: sparse.clone(),
                     files: entries.clone(),
                     ..Default::default()
