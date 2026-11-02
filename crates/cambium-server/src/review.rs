@@ -185,13 +185,19 @@ pub fn esc(s: &str) -> String {
         })
         .collect()
 }
+/// Logo for the dark header and the browser tab icon (docs/brand/logo).
+const LOGO_ON_DARK: &str = include_str!("../../../docs/brand/logo/cambium-on-dark.svg");
+const FAVICON: &str = include_str!("../../../docs/brand/logo/favicon.svg");
+async fn favicon() -> Response {
+    ([(header::CONTENT_TYPE, "image/svg+xml"), (header::CACHE_CONTROL, "public, max-age=86400")], FAVICON).into_response()
+}
 pub(crate) fn page(title: &str, who: Option<&str>, body: &str) -> Html<String> {
     Html(format!(
         r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{t} · Cambium</title><style>
 body{{font:15px/1.5 system-ui,sans-serif;margin:0;color:#16201b;background:#f3f6f4}}
 header{{background:#1d5c45;color:#fff;padding:.6rem 1.2rem;display:flex;justify-content:space-between;align-items:center}}
-header a{{color:#fff;text-decoration:none;font-weight:600}} nav.repo a,nav.repo b{{margin-right:1rem}} nav.repo{{margin-bottom:.8rem}}
+header a{{color:#fff;text-decoration:none;font-weight:600}} header a.brand{{display:flex;align-items:center;gap:.5rem}} nav.repo a,nav.repo b{{margin-right:1rem}} nav.repo{{margin-bottom:.8rem}}
 td.ln{{color:#7a8a82;text-align:right;user-select:none;width:1%;white-space:nowrap;font:13px/1.4 ui-monospace,monospace}} td.code{{font:13px/1.4 ui-monospace,monospace;white-space:pre;padding:0 .5rem}}
 table.code td{{border:0;padding:0 .4rem}} .muted{{color:#5b6b63}} main{{max-width:980px;margin:1.2rem auto;padding:0 1rem}}
 .card{{background:#fff;border:1px solid #d5ded9;border-radius:6px;padding:1rem;margin-bottom:1rem}}
@@ -202,8 +208,11 @@ pre.diff{{background:#fbfcfb;border:1px solid #d5ded9;padding:.6rem;overflow:aut
 input,textarea,select{{font:inherit;padding:.35rem;border:1px solid #b9c6bf;border-radius:4px}} textarea{{width:100%;min-height:5rem}}
 button{{font:inherit;background:#1d5c45;color:#fff;border:0;border-radius:4px;padding:.4rem .9rem;cursor:pointer}}
 .err{{color:#b42318}} form.inline{{display:inline}}
-</style></head><body><header><a href="/ui">Cambium</a><span>{w}</span></header><main>{body}</main></body></html>"#,
+</style><link rel=icon type="image/svg+xml" href="/favicon.svg"></head><body><header><a href="/ui" class=brand>{logo}Cambium</a><span>{w}</span></header><main>{body}</main></body></html>"#,
         t = esc(title),
+        logo = LOGO_ON_DARK
+            .replacen("<svg ", "<svg width=\"22\" height=\"22\" aria-hidden=\"true\" ", 1)
+            .replace("<title>Cambium</title>", ""),
         w = who
             .map(|u| format!("{} · <form class=inline method=post action=/ui/logout><button>Sign out</button></form>", esc(u)))
             .unwrap_or_default()
@@ -545,6 +554,7 @@ fn ui_act(
 pub fn ui() -> Router<St> {
     Router::new()
         .route("/ui", get(home))
+        .route("/favicon.svg", get(favicon))
         .route("/ui/login", get(login_form).post(login))
         .route("/ui/logout", post(logout))
         .route("/ui/:r", get(repo_page))

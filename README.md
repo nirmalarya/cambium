@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/brand/logo/cambium.svg" width="96" alt="Cambium logo"></p>
+
 # Cambium
 
 Server-centric source control for repositories where most commits come from agents and CI.

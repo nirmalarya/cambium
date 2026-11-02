@@ -15,7 +15,12 @@ Binaries: `cmb` (client) and `cmbd` (server). Static token prefix: `cmbt_`. Cach
 
 Source: `design/tokens.json`. The contrast check covered 11 pairs with 0 AA failures.
 
-## Logo brief
+## Logo
+Files in `docs/brand/logo/`: `cambium.svg` (primary, light backgrounds), `cambium-on-dark.svg`
+(dark backgrounds, e.g. the UI header), `favicon.svg` (simplified for 16-32 px). A trunk
+cross-section: bark, the bright cambium growth layer, then the history rings.
+
+## Logo brief (original)
 - **Idea:** growth rings. Concentric rings with one bright outer ring, so it reads as history that only ever grows outward.
 - **Favicon:** the monogram `cmb`.
 - **Sizes:** it must work at both 16px and 1024px.

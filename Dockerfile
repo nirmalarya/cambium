@@ -15,6 +15,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates crates
 COPY docs/schema.sql docs/schema-pg.sql docs/
 COPY docs/migrations docs/migrations
+COPY docs/brand/logo docs/brand/logo
 RUN cargo build --release --locked --bin cmbd --bin cmb && mkdir -p /out/data && cp target/release/cmbd target/release/cmb /out/
 
 FROM ${TOOLS_IMAGE} AS tools

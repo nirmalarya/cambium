@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Cambium">
+  <title>Cambium</title>
+  <circle cx="64" cy="64" r="61" fill="#1d5c45"/>
+  <circle cx="64" cy="64" r="53" fill="#3ccf86"/>
+  <circle cx="64" cy="64" r="47.5" fill="#f1e6cc"/>
+  <g fill="none" stroke="#c9b07c" stroke-width="2.6">
+    <circle cx="62.5" cy="65" r="38"/><circle cx="61.5" cy="65.5" r="28.5"/><circle cx="60.5" cy="66" r="19"/>
+  </g>
+  <circle cx="59.5" cy="66.5" r="7.5" fill="#b38f50"/>
+</svg>
