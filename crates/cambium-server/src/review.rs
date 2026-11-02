@@ -289,13 +289,17 @@ struct Login {
 /// Sign-in has no session yet to derive a CSRF value from, so refuse cross-site posts
 /// (login CSRF) using the browser's own headers.
 fn same_origin(h: &HeaderMap) -> bool {
-    if h.get("sec-fetch-site").and_then(|v| v.to_str().ok()).is_some_and(|v| v == "cross-site" || v == "same-site") {
-        return false;
+    let hv = |k: &str| h.get(k).and_then(|v| v.to_str().ok());
+    // modern browsers: Sec-Fetch-Site says where the form was submitted from (and is not
+    // affected by our no-referrer policy, which makes them send `Origin: null`)
+    if let Some(site) = hv("sec-fetch-site") {
+        return site == "same-origin" || site == "none";
     }
-    match (h.get("origin").and_then(|v| v.to_str().ok()), h.get("host").and_then(|v| v.to_str().ok())) {
+    // older browsers: compare a real Origin with Host; `null` carries no information
+    match (hv("origin"), hv("host")) {
+        (Some("null"), _) | (None, _) => true,
         (Some(o), Some(host)) => o.split_once("://").is_some_and(|(_, rest)| rest == host),
         (Some(_), None) => false,
-        _ => true, // non-browser clients send neither
     }
 }
 async fn login(State(st): State<St>, h: HeaderMap, Form(f): Form<Login>) -> Response {

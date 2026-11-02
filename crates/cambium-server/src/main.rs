@@ -1461,7 +1461,25 @@ mod tests {
                 .unwrap()
         };
         assert_eq!(app.clone().oneshot(login("cross-site")).await.unwrap().status(), 403);
+        assert_eq!(app.clone().oneshot(login("same-site")).await.unwrap().status(), 403);
         assert_eq!(app.clone().oneshot(login("same-origin")).await.unwrap().status(), 303);
+        // what Chrome actually sends from our own sign-in page (no-referrer => Origin: null)
+        let real = Req::post("/ui/login")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .header("host", "127.0.0.1:7878")
+            .header("origin", "null")
+            .header("sec-fetch-site", "same-origin")
+            .body(Body::from(format!("token={alice}")))
+            .unwrap();
+        assert_eq!(app.clone().oneshot(real).await.unwrap().status(), 303, "real browser sign-in works");
+        // older browser, foreign origin
+        let old = Req::post("/ui/login")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .header("host", "127.0.0.1:7878")
+            .header("origin", "https://evil.example.test")
+            .body(Body::from(format!("token={alice}")))
+            .unwrap();
+        assert_eq!(app.clone().oneshot(old).await.unwrap().status(), 403);
         // low: CAMBIUM_REPO_CREATORS limits who may create repositories
         let who = |u: &str, g: &[&str]| Principal { user: u.into(), groups: g.iter().map(|x| x.to_string()).collect() };
         assert!(creator_allowed("", &who("anyone", &[])), "unset = anyone");
