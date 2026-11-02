@@ -9,6 +9,9 @@ and keeps a bounded object cache. Clients are always online: commits go straight
 
 > **Status: pilot, not production-ready.** See [Known issues](#known-issues) before deploying.
 
+**New here? Start with the [guide](docs/guide/README.md)** — concepts for git users, a
+15-minute getting-started, everyday workflows, administration and reference.
+
 ## Quick start (local)
 ```sh
 cargo build --release

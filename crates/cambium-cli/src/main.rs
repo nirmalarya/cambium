@@ -815,42 +815,50 @@ fn flag(args: &mut Vec<String>, name: &str) -> Option<String> {
     }
 }
 
-const HELP: &str = "cmb - thin client for a Cambium server
+const HELP: &str = "cmb - client for a Cambium server (guide: docs/guide/)
 
-  cmb init <repo> [dir]                 create a repo on the server and a working copy
+Working copies
+  cmb init <repo> [dir]                 create a repository and a working copy of it
   cmb checkout <repo> <dir> [--branch B] [--sparse a/,b/]
-                                       lay out a (sparse) working copy
-  cmb status                            local changes vs the checked-out changeset
-  cmb add <path>...                     stage paths (deletions too)
-  cmb commit -m <msg>                   create a changeset and land it (the server rebases if main moved)
-  cmb commit --draft -m <msg>           create a draft changeset only (stack several, review them)
-  cmb land                              land your drafts on the branch (rebase + compare-and-swap)
-  cmb branch [release/NAME]             list main and release branches, or create a release branch
-  cmb switch <main|release/NAME>        move the working copy to another branch
-  cmb sync                              update to the branch head (drafts are rebased onto it)
-  cmb merge <rev>                       server merges <rev> (e.g. a release fix) into the current branch
-  cmb revert <rev>                      undo a changeset on top of the branch head (server-side)
-  cmb bisect <good> <bad> [--run <cmd>] find the first bad changeset (with --run: exit 0 = good)
-  cmb log [path] [-n N]                 history (first-parent), optionally for a path
-  cmb blame <path>                      per-line origin, computed on the server
-  cmb search <text> [--rev R] [-n N]    indexed search of paths and contents (only files you may read)
-  cmb watch                             monitor the working copy so status only checks changed paths
-  cmb diff [--from R] [--to R] [path]   working copy vs head, or between two revisions (renames/copies detected)
+                                       lay out a working copy (only the listed folders with --sparse)
+  cmb sync                              update to the latest branch head (your drafts are rebased onto it)
+  cmb status / cmb diff [--from R] [--to R] [path]
   cmb sparse [add <prefix> | list]      widen or show the sparse set
-  cmb mount <repo> <dir> [--rev R] [--sparse a/,b/]
-                                       read-only virtual checkout (FUSE); files download on first read
-  cmb cat <repo> <rev> <path>           read one file through the API, no working copy
-  cmb acl [list]                        show per-directory permission rules (admins)
-  cmb acl set <prefix> <principal> <perm>
-                                       principal: *, user:<name>, group:<name>; perm: none|read|write|admin
-  cmb acl rm <prefix> <principal>       remove a rule
-  cmb review create -m <title> [--target main]
-                                       ask for review of the current branch
-  cmb hook [list] | add <url> --secret S | rm <id>   webhooks for CI: every move of main / release/*
-  cmb protect <branch> <n> [--trivial N|off]  need n approvals (N for docs/comment-only changes)
-  cmb review update <n>                 point review <n> at your current drafts (old approvals lapse)
+  cmb mount <repo> <dir> [--rev R] [--sparse a/,b/] [--write]
+                                       virtual checkout (Linux, FUSE): files download on first read
+  cmb watch                             watch the working copy so status only checks changed files
+
+Changes (no feature branches: work is changesets)
+  cmb add <path>...                     stage files (deletions too)
+  cmb commit -m <msg>                   create a changeset and land it on the branch
+                                       (if the branch moved, the server rebases; no merge queue)
+  cmb commit --draft -m <msg>           create a draft changeset only; stack several
+  cmb land                              land your drafts
+  cmb revert <rev>                      undo a changeset on top of the branch (server-side)
+
+Review
+  cmb review create -m <title> [--target main]   ask for review of your drafts
+  cmb review update <n>                 point review <n> at your current drafts (earlier approvals lapse)
   cmb review [list] | show <n> | comment <n> <text> | approve <n> | merge <n> | close <n>
-  cmb protect [<branch> <approvals>]    require N approvals (by others) to change a branch
+  cmb protect <branch> <n> [--trivial N|off]
+                                       branch changes only through reviews with n approvals
+                                       (N for docs/comment-only changes); cmb protect lists rules
+
+History
+  cmb log [path] [-n N] / cmb blame <path> / cmb search <text> [--rev R] [-n N]
+  cmb cat <repo> <rev> <path>           read one file without a working copy
+  cmb bisect <good> <bad> [--run <cmd>] find the first bad changeset (with --run: exit 0 = good)
+
+Branches (only main and release/NAME exist)
+  cmb branch [release/NAME]             list branches, or create a release branch from main's history
+  cmb switch <main|release/NAME>        move the working copy to another branch
+  cmb merge <rev>                       merge <rev> (e.g. a release fix) into the current branch
+
+Administration
+  cmb acl [list] | set <prefix> <principal> <perm> | rm <prefix> <principal>
+                                       per-directory permissions; principal: *, user:<name>, group:<name>;
+                                       perm: none|read|write|admin
+  cmb hook [list] | add <url> --secret S | rm <id>   webhooks for CI on every move of main / release/*
   cmb whoami                            the user and groups the server sees for your token
 
 Executable bits and symlinks are tracked: `chmod +x` shows as a mode change in status and diff.
