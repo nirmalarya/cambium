@@ -8,6 +8,7 @@ pub mod blob;
 pub mod db;
 pub mod derived;
 pub mod engine;
+pub mod gitexport;
 pub mod gitimport;
 pub mod limits;
 pub mod log;

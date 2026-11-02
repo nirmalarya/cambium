@@ -59,6 +59,12 @@ pub const MIGRATIONS: &[Migration] = &[
         sqlite: include_str!("../../../docs/migrations/0008_webhooks.sqlite.sql"),
         pg: include_str!("../../../docs/migrations/0008_webhooks.pg.sql"),
     },
+    Migration {
+        version: 9,
+        name: "git_export",
+        sqlite: include_str!("../../../docs/migrations/0009_git_export.sqlite.sql"),
+        pg: include_str!("../../../docs/migrations/0009_git_export.pg.sql"),
+    },
 ];
 pub fn latest() -> i64 {
     MIGRATIONS.last().map_or(1, |m| m.version)

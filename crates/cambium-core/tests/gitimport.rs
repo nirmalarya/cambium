@@ -189,3 +189,77 @@ fn disallowed_paths_are_skipped_and_failed_imports_can_be_retried() {
     let m = e.manifest("r", &main).unwrap();
     assert!(m.contains_key("ok.txt") && !m.keys().any(|k| k.starts_with(".cambium")));
 }
+
+#[test]
+fn export_to_git_is_faithful_and_incremental() {
+    use cambium_core::FileChange;
+    let d = tempfile::tempdir().unwrap();
+    let e = Engine::open(d.path().join("t.db").to_str().unwrap(), Arc::new(MemBlobStore::default())).unwrap();
+    let root = e.create_repo("r", "u").unwrap();
+    let put = |p: &str, c: &str, mode: u32| FileChange { path: p.into(), blob: Some(e.put_blob(c.as_bytes()).unwrap()), mode };
+    let c1 = e
+        .commit(
+            "r",
+            "main",
+            &root,
+            "Ada Example <ada@example.invalid>",
+            "first",
+            vec![
+                put("a.txt", "one\n", 0o100644),
+                put("bin/run.sh", "#!/bin/sh\n", MODE_EXEC),
+                put("link", "a.txt", MODE_LINK),
+                put("sp ace/é.txt", "u\n", 0o100644),
+            ],
+        )
+        .unwrap()
+        .id;
+    e.cas_ref("r", "release/1", None, Some(&c1)).unwrap();
+    let fix = e.commit("r", "release/1", &c1, "bob", "fix on release", vec![put("fix.txt", "fix\n", 0o100644)]).unwrap().id;
+    let c2 = e
+        .commit(
+            "r",
+            "main",
+            &c1,
+            "alice",
+            "second\n\nwith a body",
+            vec![put("a.txt", "two\n", 0o100644), FileChange { path: "link".into(), blob: None, mode: 0o100644 }],
+        )
+        .unwrap()
+        .id;
+    let m = e.merge("r", "main", "release/1", "alice").unwrap().id;
+    let gd = d.path().join("mirror.git");
+    let rep = e.export_git("r", &gd, false).unwrap();
+    assert_eq!(rep.commits, 5, "root, first, fix, second, merge");
+    // every ref's tree matches Cambium's manifest, byte for byte
+    for (r#ref, cs) in [("main", &m), ("release/1", &fix)] {
+        let man = e.manifest("r", cs).unwrap();
+        let ls = g(&gd, &["-c", "core.quotepath=off", "ls-tree", "-r", r#ref], 0);
+        assert_eq!(ls.lines().count(), man.len(), "{ref}");
+        for l in ls.lines() {
+            let (meta, path) = l.split_once('\t').unwrap();
+            let mut it = meta.split_whitespace();
+            let (mode, sha) = (it.next().unwrap(), it.nth(1).unwrap());
+            let want = e.blobs.get(split_entry(&man[path.trim_matches('"')]).0).unwrap().unwrap();
+            let got = Command::new("git").arg("-C").arg(&gd).args(["cat-file", "blob", sha]).output().unwrap().stdout;
+            assert_eq!(got, want, "{ref}:{path}");
+            if path == "bin/run.sh" {
+                assert_eq!(mode, "100755");
+            }
+        }
+    }
+    assert!(g(&gd, &["log", "--format=%P", "-1", "main"], 0).split_whitespace().count() == 2, "merge keeps both parents");
+    assert!(g(&gd, &["log", "--format=%an <%ae>|%s", "main~1"], 0).starts_with("alice <alice@users.cambium.invalid>|second"));
+    g(&gd, &["fsck", "--strict"], 0);
+    // incremental: a new changeset adds one commit; old commits keep their ids
+    let before = g(&gd, &["rev-parse", "main"], 0);
+    e.commit("r", "main", &m, "alice", "third", vec![put("c.txt", "3\n", 0o100644)]).unwrap();
+    let rep2 = e.export_git("r", &gd, false).unwrap();
+    assert_eq!(rep2.commits, 1);
+    assert_eq!(g(&gd, &["rev-parse", "main~1"], 0), before);
+    assert_eq!(e.export_git("r", &gd, false).unwrap().commits, 0);
+    // repositories with permission rules need explicit consent
+    e.set_acl("r", &cambium_core::Principal::new("u"), "", "user:u", Some(cambium_core::Perm::Admin)).unwrap();
+    assert!(e.export_git("r", &d.path().join("other.git"), false).is_err());
+    assert!(e.export_git("r", &d.path().join("other.git"), true).is_ok());
+    let _ = c2;
+}

@@ -32,6 +32,8 @@ blame, diff, search, sparse, cat, mount [--write], watch, acl, protect, review, 
   `cmb review create -m title` opens a review of the drafts; `cmb review update <n>` points it at a
   revision. Protected refs only change through an approved review; merging it lands the changeset.
 - **Stay current:** `cmb sync` updates the working copy; drafts are rebased onto the new head.
+- **CI and git tools:** webhooks announce every move of `main`/`release/*` (`cmb hook add`), and
+  `cmbd git-export` keeps a git mirror for tools that only speak git.
 
 ## Sign-in and permissions
 - **People:** sign in through your identity provider (OIDC). Set `CAMBIUM_TOKEN_CMD` to a helper that prints a token.

@@ -63,3 +63,12 @@ cron) while teams still push to git: only new commits are imported and `main` /
 `release/*` are fast-forwarded. Once people commit in Cambium, a ref that has diverged
 is left alone and reported as skipped; at that point git is no longer the source of
 truth for that ref. Only `main` and `release/*` refs are created.
+
+## Git mirror (for git-based tools)
+`cmbd git-export <repo> <git-dir>` writes `main` and `release/*` into a git repository
+(created bare if missing). Each changeset becomes one commit with exactly its changes;
+merges keep both parents. Run it from cron (or on each webhook delivery) and publish with
+`git -C <git-dir> push --mirror <remote>`. It is incremental per mirror and existing
+commits never change. A mirror contains every file, so repositories with permission
+rules are refused unless `--allow-restricted` is passed deliberately. If the mirror
+directory is deleted, the next run rebuilds it from scratch.

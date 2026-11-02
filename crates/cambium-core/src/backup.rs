@@ -32,6 +32,7 @@ pub const TABLES: &[(&str, &str, &str)] = &[
     ("blob_uploads", "blob,principal,created_at", "blob,principal"),
     ("trees", "id,body", "id"),
     ("git_import_map", "repo,git_sha,cs_id", "repo,git_sha"),
+    ("git_export_map", "repo,mirror,cs_id,git_sha", "repo,mirror,cs_id"),
     ("webhooks", "id,repo,url,secret,created_by,created_at,last_seq,failures,next_attempt,last_error,lease_owner,lease_until", "id"),
     ("tree_paths", "tree_id,repo,path", "tree_id,repo,path"),
     ("audit_log", "seq,ts,actor,action,repo,target,outcome,detail,request_id,prev_hash,hash", "seq"),

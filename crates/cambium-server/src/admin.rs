@@ -10,6 +10,7 @@
 //!   cmbd backup <dir>                                               metadata + blobs, consistent snapshot
 //!   cmbd restore <dir>                                              into an EMPTY database + blob store
 //!   cmbd import-git <git-dir> <repo> [owner]                        import with history; run again to add new commits
+//!   cmbd git-export <repo> <git-dir> [--allow-restricted]           mirror main + release/* to git (incremental)
 //!
 //! Every command that changes state writes an audit event (actor `cli:<user>`).
 use cambium_core::audit::AuditEvent;
@@ -198,6 +199,25 @@ pub fn dispatch(eng: &Engine, _data: &str, argv: &[String]) -> Option<i32> {
                     audit(eng, "admin.backup", Some(dir.clone()), "failure", json!({"error": e.to_string()}));
                     die(e)
                 }
+            }
+        }
+        "git-export" => {
+            let allow = a.iter().any(|x| x == "--allow-restricted");
+            let (Some(repo), Some(dir)) = (a.get(2), a.get(3)) else {
+                eprintln!("usage: cmbd git-export <repo> <git-dir> [--allow-restricted]");
+                return Some(2);
+            };
+            match eng.export_git(repo, std::path::Path::new(dir), allow) {
+                Ok(r) => {
+                    println!(
+                        "exported {} new changeset(s) from {repo} to {dir}; refs: {}",
+                        r.commits,
+                        r.refs.iter().map(|(n, s)| format!("{n}={}", &s[..12])).collect::<Vec<_>>().join(", ")
+                    );
+                    audit(eng, "admin.git_export", Some(repo.clone()), "success", json!({"commits": r.commits, "allow_restricted": allow}));
+                    0
+                }
+                Err(e) => die(e),
             }
         }
         "import-git" => {

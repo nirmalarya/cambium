@@ -197,6 +197,8 @@ ok "I03 imported history and merge parents" '(cd $T/gi && cmb log | head -1 | gr
 ok "I04 blame works on imported history" '(cd $T/gi && [ $(cmb blame lib/a.txt | cut -d" " -f1 | sort -u | wc -l) = 2 ])'
 (cd $G && echo three > lib/c.txt && git add -A && git commit -qm four && echo four >> lib/c.txt && git commit -qam five)
 ok "I05 running import-git again imports only the new commits and fast-forwards main" '$BIN/cmbd import-git $G gitimp alice 2>/dev/null | grep -q "imported 2 commits" && (cd $T/gi && cmb sync >/dev/null 2>&1 && grep -q four lib/c.txt)'
+ok "I06 cmbd git-export mirrors main to git; a clone matches a fresh checkout" '$BIN/cmbd git-export demo $T/mirror.git 2>/dev/null | grep -q "exported .* refs: main=" && git clone -q $T/mirror.git $T/mclone && cmb checkout demo $T/fresh >/dev/null 2>&1 && diff -r --exclude=.cambium --exclude=.git $T/fresh $T/mclone'
+ok "I07 git-export is incremental" '(cd $T/fresh && echo more > export.md && cmb add export.md >/dev/null && cmb commit -m exported >/dev/null) && $BIN/cmbd git-export demo $T/mirror.git 2>/dev/null | grep -q "exported 1 new" && git -C $T/mirror.git log -1 --format=%s main | grep -q exported'
 
 # ---------- regional read-through cache (cmbd edge) ----------
 EP=${EDGE_PORT:-7994}; E=http://127.0.0.1:$EP
