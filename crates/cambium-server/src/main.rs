@@ -649,7 +649,12 @@ pub(crate) fn blob_store(data: &str) -> Arc<dyn BlobStore> {
         Ok("s3") => {
             let c = cambium_core::s3::S3Config::from_env().unwrap_or_else(|e| panic!("{e}"));
             cambium_core::log::info("blob store", json!({"kind": "s3", "endpoint": c.endpoint, "bucket": c.bucket}));
-            Arc::new(cambium_core::s3::S3BlobStore::new(c))
+            let st = cambium_core::s3::S3BlobStore::new(c);
+            // a fresh RustFS/MinIO has no bucket yet; without create permission this just warns
+            if let Err(e) = st.ensure_bucket() {
+                cambium_core::log::error("could not create or verify the S3 bucket", json!({"error": e.to_string()}));
+            }
+            Arc::new(st)
         }
         _ => {
             // CAMBIUM_BLOB_DIR lets several nodes share one directory (e.g. an NFS mount)

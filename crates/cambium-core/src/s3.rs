@@ -108,9 +108,23 @@ impl S3BlobStore {
     pub fn new(cfg: S3Config) -> Self {
         Self { cfg, agent: ureq::AgentBuilder::new().timeout(Duration::from_secs(60)).build() }
     }
+    /// Create the bucket if it does not exist yet (e.g. a fresh RustFS or MinIO).
+    /// "Already exists / owned by you" counts as success.
+    pub fn ensure_bucket(&self) -> std::io::Result<()> {
+        let path = format!("/{}", self.cfg.bucket);
+        match self.signed(&path, "PUT", b"") {
+            Ok(_) | Err(ureq::Error::Status(409, _)) => Ok(()),
+            Err(e) => Err(io(e)),
+        }
+    }
     #[allow(clippy::result_large_err)] // ureq's own error type; boxed at the BlobStore boundary
     fn request(&self, method: &str, id: &str, body: &[u8]) -> Result<ureq::Response, ureq::Error> {
         let path = format!("/{}/{}{}", self.cfg.bucket, self.cfg.prefix, id);
+        self.signed(&path, method, body)
+    }
+    #[allow(clippy::result_large_err)]
+    fn signed(&self, path: &str, method: &str, body: &[u8]) -> Result<ureq::Response, ureq::Error> {
+        let path = path.to_string();
         let host = self.cfg.endpoint.split("://").nth(1).unwrap_or(&self.cfg.endpoint).to_string();
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
         let date = amz_date(now);

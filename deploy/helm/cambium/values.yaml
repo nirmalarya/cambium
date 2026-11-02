@@ -22,6 +22,8 @@ existingSecret: cambium-secrets
 config:
   CAMBIUM_ADDR: "0.0.0.0:7878"
   CAMBIUM_BLOB: "s3"
+  # Reference setup: RustFS (S3-compatible, e.g. http://rustfs.<ns>.svc:9000).
+  # Any S3-compatible store works; cmbd creates the bucket if it is missing.
   CAMBIUM_S3_ENDPOINT: "https://object-store.example.internal"   # placeholder
   CAMBIUM_S3_BUCKET: "cambium-blobs"
   CAMBIUM_S3_REGION: "us-east-1"

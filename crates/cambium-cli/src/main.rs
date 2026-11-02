@@ -804,6 +804,7 @@ fn main() {
                     sparse: sparse.clone(),
                     stage: vec![],
                     files: entries.clone(),
+                    drafts: None,
                 };
                 std::fs::write(m.join("state.json"), serde_json::to_vec_pretty(&s).unwrap()).unwrap();
                 vfs::mount_rw(c, entries, sizes, &dir, &m).unwrap_or_else(err);

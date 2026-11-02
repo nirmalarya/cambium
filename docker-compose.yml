@@ -1,22 +1,57 @@
 name: cambium
-# Local or private hosting. The port binds to loopback; put your
-# reverse proxy (TLS) in front of it. Never publish it on a public interface.
+# Reference deployment: cmbd on PostgreSQL (metadata) + RustFS (S3-compatible blobs).
+# Secrets come from .env (copy .env.example; it is git-ignored). Ports bind to
+# loopback only: put your TLS reverse proxy in front of cmbd for real use.
+#   cp .env.example .env   # then set the passwords
+#   docker compose up --build -d
+#   docker compose exec cmbd cmbd token alice
 services:
+  postgres:
+    image: postgres:16-alpine@sha256:0cefaabd882e42bcb2a2f3dc56d3ce4770560ba62fd7f197f1a2e008fd5731ab
+    environment:
+      POSTGRES_USER: cambium
+      POSTGRES_DB: cambium
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}"
+    volumes: ["pg-data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cambium -d cambium"]
+      interval: 2s
+      retries: 30
+    restart: unless-stopped
+
+  rustfs:
+    image: rustfs/rustfs:1.0.4@sha256:ed9210d6411d77ffceb70d94b964a3cb7d225983368bc25bebe01e995293dcc2
+    environment:
+      RUSTFS_ACCESS_KEY: "${RUSTFS_ACCESS_KEY:?set RUSTFS_ACCESS_KEY in .env}"
+      RUSTFS_SECRET_KEY: "${RUSTFS_SECRET_KEY:?set RUSTFS_SECRET_KEY in .env}"
+    volumes: ["rustfs-data:/data"]
+    restart: unless-stopped
+
   cmbd:
     build: .
     image: cambium:local
+    depends_on:
+      postgres: { condition: service_healthy }
+      rustfs: { condition: service_started }
     ports: ["127.0.0.1:7878:7878"]
-    volumes: ["cambium-data:/data"]
+    volumes: ["cmbd-data:/data"]
     restart: unless-stopped
     environment:
+      CAMBIUM_DB: "postgresql://cambium:${POSTGRES_PASSWORD}@postgres:5432/cambium"
+      CAMBIUM_BLOB: s3
+      CAMBIUM_S3_ENDPOINT: http://rustfs:9000
+      CAMBIUM_S3_BUCKET: cambium
+      CAMBIUM_S3_ACCESS_KEY: "${RUSTFS_ACCESS_KEY}"
+      CAMBIUM_S3_SECRET_KEY: "${RUSTFS_SECRET_KEY}"
       CAMBIUM_RATE: "${CAMBIUM_RATE:-50}"
       CAMBIUM_BURST: "${CAMBIUM_BURST:-200}"
       # Single sign-on (OIDC). Leave CAMBIUM_OIDC_ISSUER empty to use static tokens only.
-      # Values come from your identity-provider app registration; do not commit real ones.
       CAMBIUM_OIDC_ISSUER: "${CAMBIUM_OIDC_ISSUER:-}"
       CAMBIUM_OIDC_AUDIENCE: "${CAMBIUM_OIDC_AUDIENCE:-}"
       CAMBIUM_OIDC_JWKS_URL: "${CAMBIUM_OIDC_JWKS_URL:-}"
       CAMBIUM_OIDC_USER_CLAIM: "${CAMBIUM_OIDC_USER_CLAIM:-}"
       CAMBIUM_OIDC_GROUPS_CLAIM: "${CAMBIUM_OIDC_GROUPS_CLAIM:-groups}"
 volumes:
-  cambium-data: {}
+  pg-data: {}
+  rustfs-data: {}
+  cmbd-data: {}

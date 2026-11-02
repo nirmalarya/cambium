@@ -34,15 +34,25 @@ jobs:
         env: { POSTGRES_USER: cambium, POSTGRES_PASSWORD: ci-only, POSTGRES_DB: cambium }
         ports: ["5432:5432"]
         options: --health-cmd "pg_isready -U cambium" --health-interval 2s --health-retries 30
+      rustfs:
+        image: rustfs/rustfs:1.0.4@sha256:ed9210d6411d77ffceb70d94b964a3cb7d225983368bc25bebe01e995293dcc2
+        env: { RUSTFS_ACCESS_KEY: cambium-ci, RUSTFS_SECRET_KEY: ci-only-secret }
+        ports: ["9000:9000"]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: rustup toolchain install $RUST_TOOLCHAIN --profile minimal && rustup default $RUST_TOOLCHAIN
       - run: sudo apt-get update && sudo apt-get install -y fuse3 libfuse3-dev pkg-config sqlite3 openssl
       - name: unit + integration + property tests
         run: cargo test --workspace --locked
-      - name: Postgres integration tests
-        env: { CAMBIUM_TEST_PG: "postgres://cambium:ci-only@127.0.0.1:5432/cambium" }
-        run: cargo test --workspace --locked -- --ignored
+      - name: Postgres + RustFS (S3) integration tests
+        env:
+          CAMBIUM_TEST_PG: "postgres://cambium:ci-only@127.0.0.1:5432/cambium"
+          CAMBIUM_TEST_S3_ENDPOINT: "http://127.0.0.1:9000"
+          CAMBIUM_TEST_S3_ACCESS_KEY: cambium-ci
+          CAMBIUM_TEST_S3_SECRET_KEY: ci-only-secret
+        run: |
+          for i in $(seq 60); do curl -s -o /dev/null http://127.0.0.1:9000/ && break; sleep 1; done
+          cargo test --workspace --locked -- --ignored
       - name: build
         run: cargo build --workspace --locked && cargo build --workspace --locked --release
       - name: end-to-end
