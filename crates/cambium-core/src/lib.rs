@@ -6,6 +6,7 @@ pub mod audit;
 pub mod backup;
 pub mod blob;
 pub mod db;
+pub mod derived;
 pub mod engine;
 pub mod gitimport;
 pub mod limits;

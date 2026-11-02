@@ -681,3 +681,36 @@ fn trees_share_unchanged_directories_and_verify() {
     assert!(!t3.entries.iter().any(|x| x.name == "b"));
     assert_eq!(e.manifest("r", &c3).unwrap().keys().collect::<Vec<_>>(), vec!["a/x", "top"]);
 }
+
+#[test]
+fn skip_lists_and_fast_ancestry() {
+    use cambium_core::derived::Skip;
+    let (e, _d) = eng();
+    let root = e.create_repo("r", "u").unwrap();
+    let mut chain = vec![root.clone()];
+    for i in 0..300 {
+        let c = e.commit("r", "main", chain.last().unwrap(), "u", "c", vec![put(&e, "f", &format!("{i}\n"))]).unwrap().id;
+        chain.push(c);
+    }
+    // skip[k] is 2^k steps back
+    let tip = chain.last().unwrap();
+    let s = e.derive::<Skip>("r", tip).unwrap();
+    for (k, x) in s.iter().enumerate() {
+        assert_eq!(x, &chain[300 - (1 << k)], "k={k}");
+    }
+    assert_eq!(s.len(), 9, "2^8 = 256 <= 300 < 512");
+    // ancestry: fast path agrees with the definition, both ways
+    assert!(e.is_ancestor("r", &root, tip).unwrap());
+    assert!(e.is_ancestor("r", &chain[137], tip).unwrap());
+    assert!(!e.is_ancestor("r", tip, &chain[137]).unwrap());
+    // with a merge in the middle, the full walk still answers correctly
+    let side = e.create_changeset("r", vec![chain[10].clone()], "u", "side", vec![put(&e, "g", "s\n")]).unwrap().id;
+    let m = e.create_changeset("r", vec![tip.clone(), side.clone()], "u", "merge", vec![put(&e, "g", "s\n")]).unwrap().id;
+    assert!(e.is_ancestor("r", &side, &m).unwrap(), "second-parent ancestor found by the full walk");
+    assert!(e.is_ancestor("r", &chain[5], &m).unwrap());
+    assert!(!e.is_ancestor("r", &side, tip).unwrap());
+    // values are stored once, under name@version
+    let n = e.db.one("SELECT count(*) FROM derived WHERE kind='skip@1'", vec![]).unwrap().unwrap().i(0);
+    assert_eq!(n, 303, "root + 300 + side + merge, each derived eagerly exactly once");
+    assert_eq!(e.backfill_derived().unwrap(), 303);
+}

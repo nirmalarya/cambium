@@ -500,6 +500,9 @@ impl Engine {
         if let Err(e) = self.root_tree(repo, &id) {
             crate::log::error("root tree not built yet", serde_json::json!({"cs": id, "error": e.to_string()}));
         }
+        if let Err(e) = self.derive_eager(repo, &id) {
+            crate::log::error("derived data not built yet", serde_json::json!({"cs": id, "error": e.to_string()}));
+        }
         Ok(Changeset { id, seq, parents, author: author.into(), message: message.into(), created_at: ts, files })
     }
 
@@ -792,6 +795,10 @@ impl Engine {
     /// generation gen(a): nothing below can reach `a`.
     pub fn is_ancestor(&self, repo: &str, a: &str, d: &str) -> Result<bool> {
         let ga = self.gen(repo, a)?;
+        // linear history (the common case without feature branches): skip-list jumps
+        if self.first_parent_reaches(repo, a, d, ga)? == Some(true) {
+            return Ok(true);
+        }
         let mut found = false;
         self.walk(repo, &[d.to_string()], |id, g| {
             if id == a {

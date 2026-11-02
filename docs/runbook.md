@@ -50,3 +50,9 @@ Triage order: readyz → error rate by route → the request id from the user's 
 | merge button disabled | approvals missing or code owners pending | the review page lists the owners still needed |
 | server stops logging / log shipper died | stderr pipe closed | cmbd keeps serving and drops log lines (P38); restart the shipper |
 | `cmb mount` errors | `fusermount3` missing or no /dev/fuse | install fuse3; use `cmb checkout` instead |
+
+## Derived data
+Derived data (skip lists today) is computed when a changeset is created. After an
+upgrade that adds or re-versions a derived type, backfill existing history with
+`cmbd derive` (idempotent; safe while the server is running). Missing values are also
+computed on first use, so the backfill only removes first-request latency.

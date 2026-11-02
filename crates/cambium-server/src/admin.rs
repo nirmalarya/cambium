@@ -171,6 +171,18 @@ pub fn dispatch(eng: &Engine, _data: &str, argv: &[String]) -> Option<i32> {
             }
             0
         }
+        "derive" => {
+            // backfill eager derived data (skip lists, ...) for existing changesets;
+            // safe to run while the server serves: each value is written once
+            match eng.backfill_derived() {
+                Ok(n) => {
+                    println!("derived data up to date for {n} changesets");
+                    audit(eng, "admin.derive", None, "success", json!({"changesets": n}));
+                    0
+                }
+                Err(e) => die(e),
+            }
+        }
         "backup" => {
             let Some(dir) = a.get(2) else {
                 eprintln!("usage: cmbd backup <dir>");
