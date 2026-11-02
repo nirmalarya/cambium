@@ -90,7 +90,13 @@ jobs:
         run: |
           docker build --target runtime -t cambium:${{ github.sha }} .
           docker build --target tools -t cambium-tools:${{ github.sha }} .
-      - name: container smoke test
-        run: IMG=cambium:${{ github.sha }} TOOLS_IMG=cambium-tools:${{ github.sha }} bash tests/docker-smoke.sh
+      - name: container smoke test (host client = the binaries shipped in the image)
+        run: |
+          id=$(docker create cambium:${{ github.sha }})
+          mkdir -p /tmp/cambium-bin
+          docker cp $id:/usr/local/bin/cmb /tmp/cambium-bin/cmb
+          docker cp $id:/usr/local/bin/cmbd /tmp/cambium-bin/cmbd
+          docker rm $id
+          BIN=/tmp/cambium-bin IMG=cambium:${{ github.sha }} TOOLS_IMG=cambium-tools:${{ github.sha }} bash tests/docker-smoke.sh
       # Pushing to a registry and signing belong in a separate release workflow
       # (see docs/rollout-checklist.md).
