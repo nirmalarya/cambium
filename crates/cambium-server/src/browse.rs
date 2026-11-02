@@ -56,7 +56,7 @@ fn clean_path(p: &str) -> Option<String> {
     let p = p.trim_matches('/').to_string();
     (p.is_empty() || cambium_core::engine::valid_path(&p)).then_some(p)
 }
-fn q(s: &str) -> String {
+pub(crate) fn q(s: &str) -> String {
     let mut o = String::new();
     for b in s.bytes() {
         match b {
@@ -89,7 +89,7 @@ pub(crate) fn nav(st: &St, r: &str, rev: &str, active: &str) -> String {
         }
     };
     format!(
-        r#"<nav class=repo><a href="/ui">Repositories</a> / <b>{rn}</b> &nbsp; {c} {h} {v}
+        r#"<nav class=repo><a href="/ui">Repositories</a> / <b>{rn}</b> &nbsp; {c} {h} {v} {s}
 <form class=inline method=get action="/ui/{rq}/code"><select name=rev>{refs}</select> <button>Go</button></form>
 <form class=inline method=get action="/ui/{rq}/search"><input type=hidden name=rev value="{revq}"><input name=q placeholder="Search code" size=24> <button>Search</button></form></nav>"#,
         rn = esc(r),
@@ -98,6 +98,7 @@ pub(crate) fn nav(st: &St, r: &str, rev: &str, active: &str) -> String {
         c = link("code", "Code", format!("/ui/{}/code?rev={}", q(r), q(rev))),
         h = link("history", "History", format!("/ui/{}/history?rev={}", q(r), q(rev))),
         v = link("reviews", "Reviews", format!("/ui/{}", q(r))),
+        s = link("settings", "Settings", format!("/ui/{}/settings", q(r))),
     )
 }
 /// "repo / a / b / c" with links to each directory.

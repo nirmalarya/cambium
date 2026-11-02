@@ -201,7 +201,7 @@ pub(crate) fn cookie_token(h: &HeaderMap) -> Option<String> {
         .filter_map(|kv| kv.trim().strip_prefix(&format!("{COOKIE}=")).map(String::from))
         .next()
 }
-fn csrf(token: &str) -> String {
+pub(crate) fn csrf(token: &str) -> String {
     hash_bytes(format!("cambium-csrf\n{token}").as_bytes())[..32].to_string()
 }
 /// Signed-in principal for UI pages, or a redirect to the sign-in form.
@@ -232,7 +232,7 @@ pub(crate) fn api_to_ui(e: ApiErr) -> Response {
     };
     ui_err(&e.0, code)
 }
-fn check_csrf(token: &str, got: &str) -> Result<(), Response> {
+pub(crate) fn check_csrf(token: &str, got: &str) -> Result<(), Response> {
     if cambium_core::blob::ct_eq(&csrf(token), got) {
         Ok(())
     } else {
@@ -304,7 +304,7 @@ async fn logout(State(st): State<St>, h: HeaderMap) -> Response {
         .into_response()
 }
 async fn home(State(st): State<St>, h: HeaderMap) -> Response {
-    let (u, _) = match ui_user(&st, &h) {
+    let (u, tok) = match ui_user(&st, &h) {
         Ok(x) => x,
         Err(r) => return r,
     };
@@ -323,7 +323,12 @@ async fn home(State(st): State<St>, h: HeaderMap) -> Response {
     page(
         "Repositories",
         Some(&u.user),
-        &format!("<div class=card><h2>Repositories</h2><table><tr><th>Repo</th><th></th><th>Reviews</th></tr>{rows}</table></div>"),
+        &format!(
+            "<div class=card><h2>Repositories</h2><table><tr><th>Repo</th><th></th><th>Reviews</th></tr>{rows}</table></div>\
+             <div class=card><h3>New repository</h3><form method=post action=/ui/repos><input type=hidden name=csrf value=\"{}\">\
+             <input name=name placeholder=\"name (letters, digits, - and _)\" required pattern=\"[A-Za-z0-9_-]+\" size=30> <button>Create</button></form></div>",
+            csrf(&tok)
+        ),
     )
     .into_response()
 }

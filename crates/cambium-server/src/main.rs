@@ -30,6 +30,7 @@ mod edge;
 mod hooks;
 mod obs;
 mod review;
+mod settings;
 use cambium_core::{Perm, Principal};
 
 /// Shared server state: the engine plus the optional identity provider.
@@ -752,6 +753,7 @@ pub fn app(st: St, lim: Arc<RateLimiter>) -> Router {
         .merge(review::ui())
         .merge(browse::ui())
         .merge(hooks::api())
+        .merge(settings::ui())
         .layer(middleware::from_fn_with_state(st.clone(), idempotent))
         .layer(middleware::from_fn_with_state((st.clone(), lim), limit))
         .layer(DefaultBodyLimit::max(max_body()))
@@ -1261,6 +1263,99 @@ mod tests {
         // signed out: sent to the sign-in page
         let r = app.oneshot(Req::get("/ui/r/code").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(r.status(), 303);
+    }
+
+    /// Settings pages: admins only, CSRF-checked, same rules as the API.
+    #[tokio::test]
+    async fn settings_pages_admin_only_and_csrf_checked() {
+        let (app, _t, e, _d) = setup(0.0, 1.0);
+        e.create_repo("r", "alice").unwrap();
+        let session = |user: &str| {
+            let tok = e.create_token(user).unwrap();
+            let p = e.verify_principal(&tok).unwrap();
+            let sid = e.create_session(&p, 3600, &tok, None).unwrap();
+            (sid.clone(), crate::review::csrf(&sid))
+        };
+        let (alice_sid, alice_csrf) = session("alice");
+        let (bob_sid, bob_csrf) = session("bob");
+        let get_page = |sid: String, uri: &'static str| {
+            let app = app.clone();
+            async move {
+                app.oneshot(Req::get(uri).header("cookie", format!("cambium_session={sid}")).body(Body::empty()).unwrap())
+                    .await
+                    .unwrap()
+                    .status()
+            }
+        };
+        let form = |sid: String, uri: String, body: String| {
+            let app = app.clone();
+            async move {
+                app.oneshot(
+                    Req::post(uri)
+                        .header("cookie", format!("cambium_session={sid}"))
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status()
+            }
+        };
+        assert_eq!(get_page(alice_sid.clone(), "/ui/r/settings").await, 200, "owner of an open repo");
+        assert_eq!(get_page(bob_sid.clone(), "/ui/r/settings").await, 403);
+        // wrong CSRF value: refused, nothing changes
+        assert_eq!(
+            form(alice_sid.clone(), "/ui/r/settings/acl".into(), "csrf=bad&prefix=&principal=user:alice&perm=admin".into()).await,
+            403
+        );
+        assert!(e.acl("r").unwrap().is_empty());
+        // bob cannot set rules even with his own valid CSRF value
+        assert_ne!(
+            form(bob_sid.clone(), "/ui/r/settings/acl".into(), format!("csrf={bob_csrf}&prefix=&principal=user:bob&perm=admin")).await,
+            303
+        );
+        assert!(e.acl("r").unwrap().is_empty());
+        // alice sets rules, protection and a webhook
+        assert_eq!(
+            form(alice_sid.clone(), "/ui/r/settings/acl".into(), format!("csrf={alice_csrf}&prefix=&principal=user:alice&perm=admin"))
+                .await,
+            303
+        );
+        assert_eq!(e.acl("r").unwrap().len(), 1);
+        assert_eq!(
+            form(alice_sid.clone(), "/ui/r/settings/protect".into(), format!("csrf={alice_csrf}&refname=main&approvals=2&trivial=1")).await,
+            303
+        );
+        assert_eq!(e.required_approvals("r", "main").unwrap(), 2);
+        assert_eq!(e.trivial_rules("r").unwrap(), vec![("main".to_string(), Some(1))]);
+        std::env::remove_var("CAMBIUM_WEBHOOK_ALLOW_LOCAL");
+        assert_eq!(
+            form(
+                alice_sid.clone(),
+                "/ui/r/settings/hooks".into(),
+                format!("csrf={alice_csrf}&url=http%3A%2F%2F169.254.169.254%2F&secret=0123456789abcdef")
+            )
+            .await,
+            400,
+            "metadata address refused"
+        );
+        assert_eq!(
+            form(
+                alice_sid.clone(),
+                "/ui/r/settings/hooks".into(),
+                format!("csrf={alice_csrf}&url=http%3A%2F%2F10.9.8.7%2Fci&secret=0123456789abcdef")
+            )
+            .await,
+            303
+        );
+        let a = Principal { user: "alice".into(), groups: vec![] };
+        let id = e.list_hooks("r", &a).unwrap()[0].id;
+        assert_eq!(form(alice_sid.clone(), format!("/ui/r/settings/hooks/{id}/delete"), format!("csrf={alice_csrf}")).await, 303);
+        assert!(e.list_hooks("r", &a).unwrap().is_empty());
+        // create a repository from the home page form
+        assert_eq!(form(bob_sid, "/ui/repos".into(), format!("csrf={bob_csrf}&name=bobs-repo")).await, 303);
+        assert!(e.list_repos().unwrap().contains(&"bobs-repo".to_string()));
     }
 
     // ---------- OIDC + per-directory permissions over HTTP ----------
