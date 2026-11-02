@@ -49,10 +49,15 @@ struct Node {
     mtime: SystemTime,
 }
 
+/// Cap on file contents held in memory by a mount.
+const LOADED_MAX: usize = 128 << 20;
+
 pub struct Vfs {
     client: Client,
     nodes: Vec<Node>,
     loaded: HashMap<u64, Vec<u8>>,
+    /// bytes held in `loaded`; kept under LOADED_MAX
+    loaded_bytes: usize,
     pub fetched: usize,
     /// Some(upper dir, journal file) when writable
     overlay: Option<(PathBuf, PathBuf)>,
@@ -107,6 +112,7 @@ impl Vfs {
             client,
             nodes,
             loaded: HashMap::new(),
+            loaded_bytes: 0,
             fetched: 0,
             overlay,
             uid: env_id("CAMBIUM_MOUNT_UID", "-u"),
@@ -187,17 +193,34 @@ impl Vfs {
             flags: 0,
         })
     }
+    /// Fetch a server-backed file into memory if needed. Memory stays bounded: when
+    /// the total would pass LOADED_MAX, the other loaded files are dropped (they are
+    /// refetched from the on-disk object cache if read again).
+    fn ensure_loaded(&mut self, ino: u64) -> bool {
+        if self.loaded.contains_key(&ino) {
+            return true;
+        }
+        let blob = match self.nodes.get(ino as usize).map(|n| &n.kind) {
+            Some(Kind::File { data: Data::Lower { blob, .. }, .. }) => blob.clone(),
+            _ => return false,
+        };
+        let d = self.client.get_blob(&blob);
+        self.fetched += 1;
+        if self.loaded_bytes + d.len() > LOADED_MAX {
+            self.loaded.clear();
+            self.loaded_bytes = 0;
+        }
+        self.loaded_bytes += d.len();
+        self.loaded.insert(ino, d);
+        true
+    }
     fn content(&mut self, ino: u64) -> Option<Vec<u8>> {
         let Kind::File { data, .. } = &self.nodes.get(ino as usize)?.kind else { return None };
         match data.clone() {
             Data::Mem(v) => Some(v),
             Data::Upper { file, .. } => std::fs::read(file).ok(),
-            Data::Lower { blob, .. } => {
-                if !self.loaded.contains_key(&ino) {
-                    let d = self.client.get_blob(&blob);
-                    self.fetched += 1;
-                    self.loaded.insert(ino, d);
-                }
+            Data::Lower { .. } => {
+                self.ensure_loaded(ino);
                 self.loaded.get(&ino).cloned()
             }
         }
@@ -214,7 +237,9 @@ impl Vfs {
         let bytes = self.content(ino).ok_or(EIO)?;
         let file = upper.join(ino.to_string());
         std::fs::write(&file, &bytes).map_err(|_| EIO)?;
-        self.loaded.remove(&ino);
+        if let Some(d) = self.loaded.remove(&ino) {
+            self.loaded_bytes -= d.len();
+        }
         if let Kind::File { data, .. } = &mut self.nodes[ino as usize].kind {
             *data = Data::Upper { file: file.clone(), size: bytes.len() as u64 };
         }
@@ -408,6 +433,17 @@ impl Filesystem for Vfs {
                 Ok(n) => reply.data(&buf[..n]),
                 Err(_) => reply.error(EIO),
             };
+        }
+        // server-backed files: slice the loaded bytes, never copy the whole file per read
+        let lower = matches!(self.nodes.get(ino as usize).map(|n| &n.kind), Some(Kind::File { data: Data::Lower { .. }, .. }));
+        if lower {
+            if !self.ensure_loaded(ino) {
+                return reply.error(EIO);
+            }
+            let d = &self.loaded[&ino];
+            let s = (offset as usize).min(d.len());
+            let e = (s + size as usize).min(d.len());
+            return reply.data(&d[s..e]);
         }
         match self.content(ino) {
             Some(d) => {

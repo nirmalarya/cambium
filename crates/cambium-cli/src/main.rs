@@ -265,14 +265,36 @@ fn cache_get(id: &str) -> Option<Vec<u8>> {
         return None;
     }
     let p = cache_dir().join(id);
+    // regular files only: in a shared cache another user could plant a symlink or FIFO
+    if !std::fs::symlink_metadata(&p).ok()?.file_type().is_file() {
+        let _ = std::fs::remove_file(&p);
+        return None;
+    }
     let d = std::fs::read(&p).ok()?;
     if hex::encode(Sha256::digest(&d)) != id {
         eprintln!("cmb: cache entry {} failed integrity check; refetching", short(id));
         let _ = std::fs::remove_file(&p);
         return None;
     }
+    // LRU: a hit refreshes the entry, so eviction drops what has not been used longest
+    let _ = std::fs::File::options().write(true).open(&p).and_then(|f| f.set_modified(std::time::SystemTime::now()));
     CACHE_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     Some(d)
+}
+/// Create a new temp file in `dir` that cannot be a pre-planted file or symlink:
+/// random name, `create_new` (O_EXCL), O_NOFOLLOW, mode set at creation.
+fn new_temp(dir: &Path, mode: u32) -> Option<(PathBuf, std::fs::File)> {
+    let p = dir.join(format!(".tmp-{}-{:016x}", std::process::id(), rand::random::<u64>()));
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(mode).custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(not(unix))]
+    let _ = mode;
+    o.open(&p).ok().map(|f| (p, f))
 }
 fn cache_put(id: &str, data: &[u8]) {
     let d = cache_dir();
@@ -287,15 +309,12 @@ fn cache_put(id: &str, data: &[u8]) {
         }
     }
     // write-then-rename so a concurrent reader never sees a half-written entry
-    let tmp = d.join(format!(".tmp-{}-{}", std::process::id(), id));
-    if std::fs::write(&tmp, data).is_err() {
+    let Some((tmp, mut f)) = new_temp(&d, if shared { 0o660 } else { 0o600 }) else { return };
+    if std::io::Write::write_all(&mut f, data).is_err() {
+        let _ = std::fs::remove_file(&tmp);
         return;
     }
-    #[cfg(unix)]
-    if shared {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o660));
-    }
+    drop(f);
     if std::fs::rename(&tmp, d.join(id)).is_err() {
         let _ = std::fs::remove_file(&tmp);
         return;
@@ -313,6 +332,13 @@ fn cache_put(id: &str, data: &[u8]) {
         .collect();
     let mut total: u64 = ents.iter().map(|e| e.1).sum();
     ents.sort();
+    // partial downloads nobody resumed within a day
+    let day_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(86_400);
+    for e in std::fs::read_dir(partial_dir()).into_iter().flatten().flatten() {
+        if e.metadata().and_then(|m| m.modified()).is_ok_and(|t| t < day_ago) {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
     for (_, len, p) in ents {
         if total <= max {
             break;
@@ -1112,6 +1138,33 @@ mod tests {
             let _ = std::fs::remove_dir_all(outside);
         }
         let _ = std::fs::remove_dir_all(root);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn cache_refuses_planted_symlinks_and_fifos() {
+        let d = tempfile_dir();
+        std::env::set_var("CAMBIUM_CACHE", &d);
+        std::env::remove_var("CAMBIUM_SHARED_CACHE");
+        let data = b"hello cache";
+        let id = hex::encode(Sha256::digest(data));
+        cache_put(&id, data);
+        assert_eq!(cache_get(&id).as_deref(), Some(&data[..]));
+        // a symlink posing as an entry is refused even if its target has the right bytes
+        let outside = d.join("outside");
+        std::fs::write(&outside, data).unwrap();
+        std::fs::remove_file(d.join(&id)).unwrap();
+        std::os::unix::fs::symlink(&outside, d.join(&id)).unwrap();
+        assert!(cache_get(&id).is_none());
+        assert!(std::fs::symlink_metadata(d.join(&id)).is_err(), "planted link removed");
+        // a FIFO must not hang the reader
+        let c = std::ffi::CString::new(d.join(&id).to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        assert!(cache_get(&id).is_none());
+        // temp files are never created over an existing path
+        let (t, _) = new_temp(&d, 0o600).unwrap();
+        assert!(t.file_name().unwrap().to_str().unwrap().starts_with(".tmp-"));
+        std::env::remove_var("CAMBIUM_CACHE");
+        let _ = std::fs::remove_dir_all(&d);
     }
     fn tempfile_dir() -> PathBuf {
         let p = std::env::temp_dir().join(format!("cmb-test-{}-{}", std::process::id(), rand::random::<u64>()));
