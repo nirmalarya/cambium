@@ -33,8 +33,8 @@ is silent, the choice made here is marked **(our choice)**.
 | No offline support | Removed the outbox | Done |
 
 ## Order of work
-1. **Ref model:** only `main` and `release/*`. Changesets are created without refs, then land on `main` (server rebase + CAS). Reviews point at changesets.
-2. **Trees and fetch protocol:** content-hashed directory trees, a recursive fetch from the root tree, and the client and mount moved onto it.
+1. ✅ **Ref model** (done): only `main` and `release/*`. Changesets are created without refs, then land on `main` (server rebase + CAS). Reviews point at changesets.
+2. ✅ **Trees and fetch protocol** (done; `cmb mount` still uses the flat listing): content-hashed directory trees, a recursive fetch from the root tree, and the client and mount moved onto it.
 3. **Derived-data framework:** move manifests, blame and path history onto it; add skip lists.
 4. **Cache tiers:** per-node daemon and regional edge with strict tiering.
 5. **Review rules, bisect/revert APIs, git ingestion and the simulation harness.**

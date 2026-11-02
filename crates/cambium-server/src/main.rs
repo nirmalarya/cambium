@@ -349,6 +349,54 @@ async fn rebase(State(st): State<St>, h: HeaderMap, Path(r): Path<String>, Json(
     let (cs, onto) = (st.resolve(&r, &b.cs)?, st.resolve(&r, &b.onto)?);
     Ok(Json(json!({"cs": st.rebase_onto(&r, &cs, &onto, &|f| check_writes(&az, f)).map_err(|e| hide_conflicts(e, &az))?})))
 }
+/// Scion-style fetch, step 1: the changeset a revision names and its root tree.
+async fn root(State(st): State<St>, h: HeaderMap, Path((r, rev)): Path<(String, String)>) -> R {
+    let u = user(&st, &h)?;
+    need(st.authz(&r, &u)?.can_any(Perm::Read), "read on this repo")?;
+    let cs = st.resolve(&r, &rev)?;
+    Ok(Json(json!({"cs": cs, "root": st.root_tree(&r, &cs)?})))
+}
+#[derive(Deserialize)]
+struct TreeQ {
+    #[serde(default)]
+    path: String,
+}
+/// Scion-style fetch, step 2: one directory. Served only where it occurs (`path`) and
+/// if the caller may see that directory; entries the caller cannot read are left out
+/// (then `complete` is false and the content no longer hashes to `id`). Immutable, so
+/// any cache may keep it.
+async fn get_tree(
+    State(st): State<St>,
+    h: HeaderMap,
+    Path((r, id)): Path<(String, String)>,
+    Query(q): Query<TreeQ>,
+) -> Result<Response, ApiErr> {
+    let u = user(&st, &h)?;
+    let az = st.authz(&r, &u)?;
+    let dir = q.path.trim_matches('/').to_string();
+    // same answer for "absent" and "not yours"
+    let nf = || ApiErr(Error::NotFound(format!("tree {id}")));
+    if !(dir.is_empty() || cambium_core::engine::valid_path(&dir)) || !az.can_see_dir(&dir) || !st.tree_at(&r, &id, &dir)? {
+        return Err(nf());
+    }
+    let t = st.get_tree(&id)?;
+    let n = t.entries.len();
+    let entries: Vec<_> = t
+        .entries
+        .into_iter()
+        .filter(|e| {
+            let p = if dir.is_empty() { e.name.clone() } else { format!("{dir}/{}", e.name) };
+            if e.kind == "tree" {
+                az.can_see_dir(&p)
+            } else {
+                az.can(&p, Perm::Read)
+            }
+        })
+        .collect();
+    let complete = entries.len() == n;
+    let body = Json(json!({"id": id, "path": dir, "complete": complete, "entries": entries}));
+    Ok(([("cache-control", if complete { "private, max-age=31536000, immutable" } else { "private, no-store" })], body).into_response())
+}
 #[derive(Deserialize)]
 struct NewChangeset {
     parent: String,
@@ -622,6 +670,8 @@ pub fn app(st: St, lim: Arc<RateLimiter>) -> Router {
         .route("/v1/repos/:r/merge", post(merge))
         .route("/v1/repos/:r/rebase", post(rebase))
         .route("/v1/repos/:r/changesets", post(create_changeset))
+        .route("/v1/repos/:r/root/*rev", get(root))
+        .route("/v1/repos/:r/trees/:id", get(get_tree))
         .route("/v1/repos/:r/land", post(land))
         .route("/v1/repos/:r/log", get(log))
         .route("/v1/repos/:r/blame", get(blame))
@@ -1035,6 +1085,45 @@ mod tests {
         assert_eq!(app.clone().oneshot(del("pay-work", &pw, &bob)).await.unwrap().status(), 403);
         assert_eq!(app.clone().oneshot(del("pub-work", &bw, &bob)).await.unwrap().status(), 200);
         assert_eq!(app.oneshot(del("pay-work", &pw, &alice)).await.unwrap().status(), 200);
+    }
+
+    /// Tree fetch: whole and verifiable for readers of everything; filtered for others;
+    /// hidden trees are not served at any path.
+    #[tokio::test]
+    async fn tree_fetch_respects_permissions() {
+        let (app, alice, e, _d) = setup(0.0, 1.0);
+        let bob = e.create_token("bob").unwrap();
+        let root = e.create_repo("r", "alice").unwrap();
+        let fc = |p: &str| cambium_core::FileChange {
+            path: p.into(),
+            blob: Some(e.put_blob(p.as_bytes()).unwrap()),
+            mode: cambium_core::engine::MODE_FILE,
+        };
+        e.commit("r", "main", &root, "alice", "c", vec![fc("pub/a"), fc("pay/s")]).unwrap();
+        let a = Principal { user: "alice".into(), groups: vec![] };
+        e.set_acl("r", &a, "", "user:alice", Some(Perm::Admin)).unwrap();
+        e.set_acl("r", &a, "pub", "user:bob", Some(Perm::Read)).unwrap();
+        let body = |r: axum::response::Response| async {
+            serde_json::from_slice::<Value>(&to_bytes(r.into_body(), 1 << 20).await.unwrap()).unwrap()
+        };
+        let rt = body(app.clone().oneshot(get("/v1/repos/r/root/main", &alice, None)).await.unwrap()).await;
+        let rid = rt["root"].as_str().unwrap().to_string();
+        let full = body(app.clone().oneshot(get(&format!("/v1/repos/r/trees/{rid}"), &alice, None)).await.unwrap()).await;
+        assert_eq!(full["complete"], true);
+        let entries: Vec<cambium_core::tree::TreeEntry> = serde_json::from_value(full["entries"].clone()).unwrap();
+        assert_eq!(cambium_core::tree::Tree { entries: entries.clone() }.id(), rid, "client can verify the tree");
+        let pay = entries.iter().find(|x| x.name == "pay").unwrap().id.clone();
+        // bob: root is filtered to pub only
+        let filtered = body(app.clone().oneshot(get(&format!("/v1/repos/r/trees/{rid}"), &bob, None)).await.unwrap()).await;
+        assert_eq!(filtered["complete"], false);
+        assert_eq!(filtered["entries"].as_array().unwrap().len(), 1);
+        assert!(!filtered.to_string().contains("pay"));
+        // the hidden tree is not served, at its own path or a readable one
+        for path in ["pay", "pub"] {
+            let r = app.clone().oneshot(get(&format!("/v1/repos/r/trees/{pay}?path={path}"), &bob, None)).await.unwrap();
+            assert_eq!(r.status(), 404, "{path}");
+        }
+        assert_eq!(app.oneshot(get(&format!("/v1/repos/r/trees/{pay}?path=pay"), &alice, None)).await.unwrap().status(), 200);
     }
 
     // ---------- OIDC + per-directory permissions over HTTP ----------

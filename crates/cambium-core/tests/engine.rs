@@ -656,3 +656,28 @@ fn reopening_does_not_rewrite_indexes() {
     let g: i64 = c.query_row("SELECT max(gen) FROM changesets", [], |r| r.get(0)).unwrap();
     assert_eq!(g, 42);
 }
+
+#[test]
+fn trees_share_unchanged_directories_and_verify() {
+    let (e, _d) = eng();
+    let root = e.create_repo("r", "u").unwrap();
+    let c1 =
+        e.commit("r", "main", &root, "u", "one", vec![put(&e, "a/x", "1\n"), put(&e, "b/y", "2\n"), put(&e, "top", "t\n")]).unwrap().id;
+    let c2 = e.commit("r", "main", &c1, "u", "two", vec![put(&e, "a/x", "changed\n")]).unwrap().id;
+    let (t1, t2) = (e.get_tree(&e.root_tree("r", &c1).unwrap()).unwrap(), e.get_tree(&e.root_tree("r", &c2).unwrap()).unwrap());
+    let id_of = |t: &cambium_core::tree::Tree, n: &str| t.entries.iter().find(|x| x.name == n).unwrap().id.clone();
+    assert_ne!(id_of(&t1, "a"), id_of(&t2, "a"), "changed directory gets a new tree");
+    assert_eq!(id_of(&t1, "b"), id_of(&t2, "b"), "unchanged directory is the same object");
+    // ids are verifiable from content
+    let rid = e.root_tree("r", &c2).unwrap();
+    assert_eq!(e.get_tree(&rid).unwrap().id(), rid);
+    assert!(e.tree_at("r", &id_of(&t2, "b"), "b").unwrap() && !e.tree_at("r", &id_of(&t2, "b"), "a").unwrap());
+    // file sizes are in the tree
+    let a = e.get_tree(&id_of(&t2, "a")).unwrap();
+    assert_eq!(a.entries[0].size, 8);
+    // emptied directories disappear
+    let c3 = e.commit("r", "main", &c2, "u", "rm", vec![FileChange { path: "b/y".into(), blob: None, mode: MODE_FILE }]).unwrap().id;
+    let t3 = e.get_tree(&e.root_tree("r", &c3).unwrap()).unwrap();
+    assert!(!t3.entries.iter().any(|x| x.name == "b"));
+    assert_eq!(e.manifest("r", &c3).unwrap().keys().collect::<Vec<_>>(), vec!["a/x", "top"]);
+}

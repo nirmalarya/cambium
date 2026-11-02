@@ -27,6 +27,13 @@ struct State {
     /// tip of local draft changesets not yet on `branch` (none when everything landed)
     #[serde(default)]
     drafts: Option<String>,
+    /// directory -> tree id as laid out (complete trees only); unchanged trees are
+    /// skipped on the next sync
+    #[serde(default)]
+    trees: BTreeMap<String, String>,
+    /// the sparse set `trees` was recorded for
+    #[serde(default)]
+    trees_sparse: Vec<String>,
 }
 
 /// Error text for a server error body, with a hint where one helps.
@@ -579,11 +586,70 @@ fn changes(root: &Path, s: &State) -> BTreeMap<String, Option<String>> {
     out
 }
 
+static TREES_FETCHED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static TREES_REUSED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Scion-style fetch: start at the root tree of `target` and walk down, skipping every
+/// directory whose tree id is unchanged since the last layout (its files are reused),
+/// and only entering directories inside the sparse set. Returns (changeset, files,
+/// complete trees seen).
+fn fetch_tree(c: &Client, s: &State, target: &str) -> (String, BTreeMap<String, String>, BTreeMap<String, String>) {
+    let r = c.get(&format!("/v1/repos/{}/root/{target}", s.repo), &[]);
+    let (cs, root) = (r["cs"].as_str().unwrap().to_string(), r["root"].as_str().unwrap().to_string());
+    let reuse = s.trees_sparse == s.sparse;
+    let in_scope_dir = |d: &str| {
+        s.sparse.is_empty()
+            || s.sparse.iter().any(|x| {
+                let x = x.trim_end_matches('/');
+                d.is_empty() || d == x || d.starts_with(&format!("{x}/")) || x.starts_with(&format!("{d}/"))
+            })
+    };
+    let (mut files, mut trees) = (BTreeMap::new(), BTreeMap::new());
+    let mut todo = vec![(String::new(), root)];
+    while let Some((dir, id)) = todo.pop() {
+        if reuse && s.trees.get(&dir) == Some(&id) {
+            // unchanged directory: keep what is laid out under it
+            TREES_REUSED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let under = |p: &String| dir.is_empty() || p.starts_with(&format!("{dir}/"));
+            files.extend(s.files.iter().filter(|(p, _)| under(p)).map(|(p, e)| (p.clone(), e.clone())));
+            trees.extend(s.trees.iter().filter(|(p, _)| *p == &dir || under(p)).map(|(p, t)| (p.clone(), t.clone())));
+            continue;
+        }
+        TREES_FETCHED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let t = c.get(&format!("/v1/repos/{}/trees/{id}?path={dir}", s.repo), &[]);
+        if t["complete"] == true {
+            trees.insert(dir.clone(), id);
+        }
+        for e in t["entries"].as_array().unwrap() {
+            let name = e["name"].as_str().unwrap();
+            let p = if dir.is_empty() { name.to_string() } else { format!("{dir}/{name}") };
+            let eid = e["id"].as_str().unwrap().to_string();
+            match e["kind"].as_str().unwrap() {
+                "tree" => {
+                    if in_scope_dir(&p) {
+                        todo.push((p, eid));
+                    }
+                }
+                k => {
+                    if in_sparse(s, &p) {
+                        let mode = match k {
+                            "exec" => cambium_core::engine::MODE_EXEC,
+                            "link" => MODE_LINK,
+                            _ => MODE_FILE,
+                        };
+                        files.insert(p, entry(&eid, mode));
+                    }
+                }
+            }
+        }
+    }
+    (cs, files, trees)
+}
+
 /// Bring the working copy to `target`, fetching only files inside the sparse set.
 fn materialise(c: &Client, root: &Path, s: &mut State, target: &str) {
     let local = changes(root, s);
-    let t = c.post(&format!("/v1/repos/{}/tree", s.repo), json!({"rev": target, "prefixes": s.sparse}));
-    let entries: BTreeMap<String, String> = serde_json::from_value(t["entries"].clone()).unwrap();
+    let (cs, entries, trees) = fetch_tree(c, s, target);
+    let t = json!({"cs": cs});
     let (mut fetched, mut removed) = (0, 0);
     // removals first, so a path can change between file, folder and symlink
     for p in s.files.keys() {
@@ -609,6 +675,8 @@ fn materialise(c: &Client, root: &Path, s: &mut State, target: &str) {
         fetched += 1;
     }
     s.files = entries;
+    s.trees = trees;
+    s.trees_sparse = s.sparse.clone();
     s.head = t["cs"].as_str().unwrap().to_string();
     eprintln!("at {} ({} files fetched, {} removed, {} tracked)", short(&s.head), fetched, removed, s.files.len());
     if std::env::var("CAMBIUM_STATS").is_ok() {
@@ -616,6 +684,11 @@ fn materialise(c: &Client, root: &Path, s: &mut State, target: &str) {
             "cambium-stats: {} from cache, {} from server",
             CACHE_HITS.load(std::sync::atomic::Ordering::Relaxed),
             NET_FETCHES.load(std::sync::atomic::Ordering::Relaxed)
+        );
+        eprintln!(
+            "cambium-stats: trees {} fetched, {} unchanged",
+            TREES_FETCHED.load(std::sync::atomic::Ordering::Relaxed),
+            TREES_REUSED.load(std::sync::atomic::Ordering::Relaxed)
         );
     }
 }
@@ -802,9 +875,8 @@ fn main() {
                     branch: rev.clone(),
                     head: t["cs"].as_str().unwrap_or("").into(),
                     sparse: sparse.clone(),
-                    stage: vec![],
                     files: entries.clone(),
-                    drafts: None,
+                    ..Default::default()
                 };
                 std::fs::write(m.join("state.json"), serde_json::to_vec_pretty(&s).unwrap()).unwrap();
                 vfs::mount_rw(c, entries, sizes, &dir, &m).unwrap_or_else(err);

@@ -35,6 +35,12 @@ pub const MIGRATIONS: &[Migration] = &[
         sqlite: include_str!("../../../docs/migrations/0004_session_token.sqlite.sql"),
         pg: include_str!("../../../docs/migrations/0004_session_token.pg.sql"),
     },
+    Migration {
+        version: 5,
+        name: "trees",
+        sqlite: include_str!("../../../docs/migrations/0005_trees.sqlite.sql"),
+        pg: include_str!("../../../docs/migrations/0005_trees.pg.sql"),
+    },
 ];
 pub fn latest() -> i64 {
     MIGRATIONS.last().map_or(1, |m| m.version)

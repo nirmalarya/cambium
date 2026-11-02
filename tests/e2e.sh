@@ -47,6 +47,11 @@ ok "F06 sparse checkout fetches only prefix" 'cmb checkout demo sp --sparse src 
 ok "F06 sparse list" '(cd sp && cmb sparse | grep -q src)'
 ok "F06 sparse widen" '(cd sp && cmb sparse add docs && [ -e docs/readme.md ])'
 ok "F07 API-only read (no working copy)" 'cmb cat demo main src/lib.rs | grep -q inserted'
+# Scion-style fetch: root tree -> changed trees -> blobs; unchanged directories are skipped
+(cd $T && cmb init trees tr >/dev/null 2>&1 && cd tr && mkdir -p a b c && echo 1 > a/x && echo 2 > b/y && echo 3 > c/z && cmb add a b c >/dev/null && cmb commit -m dirs >/dev/null)
+(cd $T && cmb checkout trees tr2 >/dev/null 2>&1)
+(cd $T/tr && echo changed > a/x && cmb add a >/dev/null && cmb commit -m "only a" >/dev/null)
+ok "T01 sync fetches only the changed trees (root + a), reuses b and c" '(cd $T/tr2 && CAMBIUM_STATS=1 cmb sync 2>&1 | grep -q "trees 2 fetched, 2 unchanged" && grep -q changed a/x)'
 ok "F02 commit after main moved is rebased, not refused" '(cd sp && echo z > src/z.rs && cmb add src >/dev/null && (cd ../wc2 && cmb sync >/dev/null 2>&1; echo q2 > docs/q2.md && cmb add docs && cmb commit -m q2) >/dev/null 2>&1 && cmb commit -m z | grep -q "^\[main" && [ -e docs/q2.md ])'
 ok "F08 cache bounded" 'CAMBIUM_CACHE_MAX=1 cmb checkout demo tiny >/dev/null 2>&1; [ $(ls $CAMBIUM_CACHE | wc -l) -le 1 ]'
 HEAD_ID=$(curl -s -H "Authorization: Bearer $CAMBIUM_TOKEN" $CAMBIUM_SERVER/v1/repos/demo/resolve/main | python3 -c 'import sys,json; print(json.load(sys.stdin)["cs"])')

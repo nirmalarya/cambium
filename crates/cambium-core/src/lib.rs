@@ -16,4 +16,5 @@ pub mod s3;
 pub mod search;
 pub mod text;
 pub mod tokens;
+pub mod tree;
 pub use engine::{AclRule, Authz, Changeset, Engine, Error, FileChange, Perm, Principal};

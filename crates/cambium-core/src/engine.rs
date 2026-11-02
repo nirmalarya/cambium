@@ -164,6 +164,12 @@ impl Authz {
     pub fn can(&self, path: &str, p: Perm) -> bool {
         self.perm(path) >= p
     }
+    /// May the principal see directory `dir` (to list it): read on it, or read on
+    /// something beneath it.
+    pub fn can_see_dir(&self, dir: &str) -> bool {
+        self.can(dir, Perm::Read)
+            || self.rules.iter().any(|r| self.names.contains(&r.principal) && under(dir, &r.prefix) && self.can(&r.prefix, Perm::Read))
+    }
     /// True if the principal has at least `p` somewhere in the repo.
     pub fn can_any(&self, p: Perm) -> bool {
         self.open() || self.can("", p) || self.rules.iter().any(|r| self.names.contains(&r.principal) && self.can(&r.prefix, p))
@@ -191,6 +197,8 @@ enum Step {
 pub struct Engine {
     pub db: Db,
     pub blobs: Arc<dyn BlobStore>,
+    /// recently built manifests (read from trees); bounded, cleared when full
+    manifests: std::sync::Mutex<std::collections::HashMap<String, Arc<Manifest>>>,
 }
 
 fn now() -> i64 {
@@ -272,7 +280,7 @@ impl Engine {
         c.execute_batch(SCHEMA)?;
         let mut c = c;
         crate::migrate::run(&mut c)?;
-        let e = Self { db: Db::Sqlite(std::sync::Mutex::new(c)), blobs };
+        let e = Self { db: Db::Sqlite(std::sync::Mutex::new(c)), blobs, manifests: Default::default() };
         if need_gen || (existed && !had_history) {
             e.backfill_indexes()?;
         }
@@ -281,7 +289,7 @@ impl Engine {
     /// Postgres at `url` (`postgres://...`): several cmbd nodes may share it.
     pub fn open_pg(url: &str, blobs: Arc<dyn BlobStore>) -> Result<Self> {
         let pool = std::env::var("CAMBIUM_PG_POOL").ok().and_then(|v| v.parse().ok()).unwrap_or(4);
-        Ok(Self { db: Db::open_pg(url, pool)?, blobs })
+        Ok(Self { db: Db::open_pg(url, pool)?, blobs, manifests: Default::default() })
     }
     /// Fill generation numbers and the path history index for changesets written
     /// by versions that predate them. Idempotent.
@@ -487,6 +495,11 @@ impl Engine {
             }
             Ok((id, seq))
         })?;
+        // derive the root tree now, so fetches never wait for it (if this fails it is
+        // computed on first use instead)
+        if let Err(e) = self.root_tree(repo, &id) {
+            crate::log::error("root tree not built yet", serde_json::json!({"cs": id, "error": e.to_string()}));
+        }
         Ok(Changeset { id, seq, parents, author: author.into(), message: message.into(), created_at: ts, files })
     }
 
@@ -603,32 +616,21 @@ impl Engine {
     }
 
     /// Full manifest at a changeset, derived from first parent + changed files.
+    /// Every file in changeset `cs`, read from its root tree (unchanged directories are
+    /// shared tree objects, so nothing per changeset grows with the repo size).
     pub fn manifest(&self, repo: &str, cs: &str) -> Result<Manifest> {
-        let mut chain = Vec::new();
-        let mut cur = Some(cs.to_string());
+        let key = format!("{repo}\n{cs}");
+        if let Some(m) = self.manifests.lock().unwrap().get(&key) {
+            return Ok((**m).clone());
+        }
+        let root = self.root_tree(repo, cs)?;
         let mut m = Manifest::new();
-        while let Some(c) = cur {
-            if let Some(v) = self.derived_get("manifest", &c, "")? {
-                m = serde_json::from_str(&v).unwrap();
-                break;
-            }
-            let ch = self.get_changeset(repo, &c)?;
-            cur = ch.parents.first().cloned();
-            chain.push(ch);
+        self.manifest_of_tree(&root, "", &mut m)?;
+        let mut cache = self.manifests.lock().unwrap();
+        if cache.len() >= 64 {
+            cache.clear();
         }
-        for ch in chain.iter().rev() {
-            for f in &ch.files {
-                match &f.blob {
-                    Some(b) => {
-                        m.insert(f.path.clone(), entry(b, f.mode));
-                    }
-                    None => {
-                        m.remove(&f.path);
-                    }
-                }
-            }
-            self.derived_put("manifest", &ch.id, "", &serde_json::to_string(&m).unwrap())?;
-        }
+        cache.insert(key, Arc::new(m.clone()));
         Ok(m)
     }
 

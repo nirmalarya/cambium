@@ -20,7 +20,7 @@ pub const TABLES: &[(&str, &str, &str)] = &[
     ("repos", "name,owner,created_at", "name"),
     ("acl", "repo,prefix,principal,perm", "repo,prefix,principal"),
     ("wal", "seq,repo,kind,payload,created_at", "seq"),
-    ("changesets", "id,repo,seq,parent1,parent2,author,message,created_at,gen", "seq"),
+    ("changesets", "id,repo,seq,parent1,parent2,author,message,created_at,gen,root_tree", "seq"),
     ("changeset_files", "cs_id,path,blob,mode", "cs_id,path"),
     ("refs", "repo,name,cs_id,version", "repo,name"),
     ("path_history", "repo,dir,gen,cs_id", "repo,dir,cs_id"),
@@ -30,6 +30,8 @@ pub const TABLES: &[(&str, &str, &str)] = &[
     ("protected_refs", "repo,name,required_approvals", "repo,name"),
     ("blob_meta", "blob,size", "blob"),
     ("blob_uploads", "blob,principal,created_at", "blob,principal"),
+    ("trees", "id,body", "id"),
+    ("tree_paths", "tree_id,repo,path", "tree_id,repo,path"),
     ("audit_log", "seq,ts,actor,action,repo,target,outcome,detail,request_id,prev_hash,hash", "seq"),
 ];
 const SERIALS: &[(&str, &str)] = &[("wal", "seq"), ("reviews", "id"), ("review_comments", "id"), ("audit_log", "seq")];
