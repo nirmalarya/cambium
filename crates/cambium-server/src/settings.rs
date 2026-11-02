@@ -58,6 +58,9 @@ async fn create_repo(State(st): State<St>, h: HeaderMap, Form(f): Form<NewRepo>)
         Ok(u) => u,
         Err(r) => return r,
     };
+    if !crate::may_create_repo(&u) {
+        return ui_err("you may not create repositories here", StatusCode::FORBIDDEN);
+    }
     match st.create_repo(f.name.trim(), &u.user) {
         Ok(_) => Redirect::to(&format!("/ui/{}/code", crate::browse::q(f.name.trim()))).into_response(),
         Err(e) => api_to_ui(ApiErr(e)),

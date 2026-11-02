@@ -207,7 +207,9 @@ fn tree_batch(e: &Edge, repo: &str, path_q: &str, h: &HeaderMap, body: &[u8]) ->
         let v: serde_json::Value = serde_json::from_reader(x.into_reader()).ok()?;
         let trees = v["trees"].as_array()?;
         for (slot, t) in misses.iter().zip(trees) {
-            if t.get("error").is_none() {
+            // reuse authorization only for callers who saw the complete tree: a filtered
+            // answer must never let this caller be served the unfiltered cached copy
+            if t.get("error").is_none() && t["complete"] == true {
                 let (id, _, object, file) = key(&items[*slot])?;
                 e.remember(h, &object);
                 keep_tree(&file, &id, t, t.to_string().as_bytes());
@@ -276,10 +278,13 @@ fn handle_get(e: &Edge, method: String, path_q: String, h: HeaderMap, body: Byte
             if std::io::Read::read_to_end(&mut x.into_reader(), &mut body).is_err() {
                 return bad("upstream read failed".into());
             }
-            e.remember(&h, &object);
-            // keep only complete trees whose content matches their id
+            // keep only complete trees whose content matches their id, and reuse the
+            // authorization only for callers who saw the tree complete
             if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&body) {
-                keep_tree(&file, &id, &v, &body);
+                if v["complete"] == true {
+                    e.remember(&h, &object);
+                    keep_tree(&file, &id, &v, &body);
+                }
             }
             return ([("content-type", "application/json"), ("x-cambium-edge", "miss")], body).into_response();
         }

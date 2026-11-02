@@ -389,14 +389,15 @@ impl Engine {
         };
         Ok(())
     }
-    /// A blob may be read if it is unreferenced (just uploaded) or some path that
+    /// A blob may be read by whoever uploaded it, or if some path that
     /// references it is readable by `who`.
     pub fn blob_readable(&self, id: &str, who: &Principal) -> Result<bool> {
         let refs = self
             .db
             .query("SELECT DISTINCT c.repo, f.path FROM changeset_files f JOIN changesets c ON c.id=f.cs_id WHERE f.blob=?1", p![id])?;
         if refs.is_empty() {
-            return Ok(true);
+            // not part of any changeset yet: only whoever uploaded it
+            return Ok(self.db.one("SELECT 1 FROM blob_uploads WHERE blob=?1 AND principal=?2", p![id, &who.user])?.is_some());
         }
         let mut cache: BTreeMap<String, Authz> = BTreeMap::new();
         for r in refs {

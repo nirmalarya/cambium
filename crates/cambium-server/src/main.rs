@@ -132,11 +132,24 @@ fn guard_protected(st: &St, r: &str, name: &str) -> Result<(), ApiErr> {
     }
     Ok(())
 }
+/// Every file needs write access. The error names only paths the caller can read;
+/// the rest are counted, so a refusal never reveals hidden file names.
 pub(crate) fn check_writes(az: &cambium_core::Authz, files: &[FileChange]) -> cambium_core::engine::Result<()> {
-    for f in files {
-        az.require(&f.path, Perm::Write)?;
+    let denied: Vec<&str> = files.iter().filter(|f| !az.can(&f.path, Perm::Write)).map(|f| f.path.as_str()).collect();
+    if denied.is_empty() {
+        return Ok(());
     }
-    Ok(())
+    let shown: Vec<&str> = denied.iter().copied().filter(|p| az.can(p, Perm::Read)).take(5).collect();
+    let hidden = denied.iter().filter(|p| !az.can(p, Perm::Read)).count();
+    let mut what = shown.join(", ");
+    if hidden > 0 {
+        what = if what.is_empty() {
+            format!("{hidden} path(s) you cannot read")
+        } else {
+            format!("{what} and {hidden} path(s) you cannot read")
+        };
+    }
+    Err(Error::Forbidden(format!("write on {what}")))
 }
 /// Hide files the caller may not read; drop changesets that only touched such files.
 pub(crate) fn redact(az: &cambium_core::Authz, mut cs: cambium_core::Changeset) -> Option<cambium_core::Changeset> {
@@ -156,8 +169,21 @@ pub(crate) fn redact(az: &cambium_core::Authz, mut cs: cambium_core::Changeset) 
 struct NewRepo {
     name: String,
 }
+/// CAMBIUM_REPO_CREATORS="group:platform,user:alice" limits who may create repositories
+/// (the creator becomes the repo's admin); unset or empty = any signed-in user.
+pub(crate) fn may_create_repo(u: &Principal) -> bool {
+    creator_allowed(&std::env::var("CAMBIUM_REPO_CREATORS").unwrap_or_default(), u)
+}
+fn creator_allowed(list: &str, u: &Principal) -> bool {
+    let list: Vec<&str> = list.split(',').map(str::trim).filter(|x| !x.is_empty()).collect();
+    list.is_empty()
+        || list.iter().any(|e| {
+            e.strip_prefix("user:") == Some(u.user.as_str()) || e.strip_prefix("group:").is_some_and(|g| u.groups.iter().any(|x| x == g))
+        })
+}
 async fn create_repo(State(st): State<St>, h: HeaderMap, Json(b): Json<NewRepo>) -> R {
     let u = user(&st, &h)?;
+    need(may_create_repo(&u), "permission to create repositories (CAMBIUM_REPO_CREATORS)")?;
     let root = st.create_repo(&b.name, &u.user)?;
     Ok(Json(json!({"repo": b.name, "main": root})))
 }
@@ -191,7 +217,19 @@ async fn cas(State(st): State<St>, h: HeaderMap, Path((r, name)): Path<(String, 
     }
     if !az.open() {
         match (&b.expected, &new) {
-            (None, _) => need(az.can_any(Perm::Read), "read on this repo")?,
+            (None, target) => {
+                // a new release branch: writers only, and only at history already on main
+                // (otherwise anyone's unreviewed draft could reach release pipelines)
+                need(az.can_any(Perm::Write), "write in this repo to create a release branch")?;
+                if !az.can("", Perm::Admin) {
+                    let main = st.get_ref(&r, "main")?;
+                    let on_main = match (target, main) {
+                        (Some(t), Some(m)) => st.is_ancestor(&r, t, &m)?,
+                        _ => false,
+                    };
+                    need(on_main, "a release branch must start at a changeset already on main")?;
+                }
+            }
             (Some(old), None) => {
                 // deleting a branch discards its work: admins, or whoever may write every
                 // path where it differs from main
@@ -509,6 +547,10 @@ async fn log(State(st): State<St>, h: HeaderMap, Path(r): Path<String>, Query(q)
     let u = user(&st, &h)?;
     let az = st.authz(&r, &u)?;
     need(az.can_any(Perm::Read), "read on this repo")?;
+    if let Some(p) = q.path.as_deref().filter(|p| !p.is_empty()) {
+        // same answer for hidden and missing paths
+        need(az.can(p, Perm::Read) || az.can_see_dir(p), "read on this path")?;
+    }
     let cs = st.resolve(&r, &q.rev)?;
     let limit = q.limit.unwrap_or(50).clamp(1, 1000);
     // over-fetch when redacting so the caller still gets up to `limit` entries
@@ -1007,7 +1049,8 @@ mod tests {
     #[tokio::test]
     async fn blob_range_resume() {
         let (app, t, e, _d) = setup(0.0, 1.0);
-        let id = e.blobs.put(b"0123456789").unwrap();
+        // an unreferenced blob is readable by whoever uploaded it
+        let id = e.put_blob_as(b"0123456789", &Principal { user: "alice".into(), groups: vec![] }).unwrap();
         let r = app.clone().oneshot(get(&format!("/v1/blobs/{id}"), &t, None)).await.unwrap();
         assert_eq!(r.status(), 200);
         assert_eq!(r.headers()["accept-ranges"], "bytes");
@@ -1083,11 +1126,12 @@ mod tests {
             app.clone().oneshot(post(&format!("/v1/repos/r/reviews/{id}/comments"), &alice, c("pay/s"))).await.unwrap().status(),
             200
         );
-        assert_eq!(app.clone().oneshot(post(&format!("/v1/repos/r/reviews/{id}/comments"), &bob, c("pay/s"))).await.unwrap().status(), 403);
-        let shown = body(app.clone().oneshot(get(&format!("/v1/repos/r/reviews/{id}"), &bob, None)).await.unwrap()).await;
-        assert_eq!(shown["comments"].as_array().unwrap().len(), 0, "bob must not see comments on pay/");
-        // bob cannot approve a change he cannot fully see
-        assert_eq!(app.clone().oneshot(post(&format!("/v1/repos/r/reviews/{id}/approve"), &bob, json!({}))).await.unwrap().status(), 403);
+        // the review changes pay/, which bob cannot read: to him it does not exist
+        assert_eq!(app.clone().oneshot(post(&format!("/v1/repos/r/reviews/{id}/comments"), &bob, c("pub/a"))).await.unwrap().status(), 404);
+        assert_eq!(app.clone().oneshot(get(&format!("/v1/repos/r/reviews/{id}"), &bob, None)).await.unwrap().status(), 404);
+        let listed = body(app.clone().oneshot(get("/v1/repos/r/reviews", &bob, None)).await.unwrap()).await;
+        assert_eq!(listed.as_array().unwrap().len(), 0, "not listed either");
+        assert_ne!(app.clone().oneshot(post(&format!("/v1/repos/r/reviews/{id}/approve"), &bob, json!({}))).await.unwrap().status(), 200);
         // conflicts: both sides edit pub/a and pay/s
         e.commit("r", "main", &base, "alice", "main side", vec![fc("pub/a", "3\n"), fc("pay/s", "3\n")]).unwrap();
         let r = app.clone().oneshot(post("/v1/repos/r/merge", &bob, json!({"target": "main", "source": "feat"}))).await.unwrap();
@@ -1358,6 +1402,74 @@ mod tests {
         assert!(e.list_repos().unwrap().contains(&"bobs-repo".to_string()));
     }
 
+    /// Regressions for the independent security review (2026-11-02).
+    #[tokio::test]
+    async fn security_review_regressions() {
+        let (app, alice, e, _d) = setup(0.0, 1.0);
+        let reader = e.create_token("rita").unwrap();
+        let root = e.create_repo("r", "alice").unwrap();
+        let fc = |p: &str, c: &str| cambium_core::FileChange {
+            path: p.into(),
+            blob: Some(e.put_blob(c.as_bytes()).unwrap()),
+            mode: cambium_core::engine::MODE_FILE,
+        };
+        let c1 = e.commit("r", "main", &root, "alice", "public", vec![fc("proj/pub/a", "1\n")]).unwrap().id;
+        let c2 = e.commit("r", "main", &c1, "alice", "SECRET: acquire Initech", vec![fc("proj/priv/acquisition.txt", "x\n")]).unwrap().id;
+        let a = Principal { user: "alice".into(), groups: vec![] };
+        e.set_acl("r", &a, "", "user:alice", Some(Perm::Admin)).unwrap();
+        e.set_acl("r", &a, "proj/pub", "user:rita", Some(Perm::Read)).unwrap();
+        let text =
+            |r: axum::response::Response| async { String::from_utf8_lossy(&to_bytes(r.into_body(), 1 << 20).await.unwrap()).to_string() };
+        // 3: refusals never name hidden paths
+        let r = app.clone().oneshot(post("/v1/repos/r/refs/release/probe", &alice, json!({"expected": null, "new": c1}))).await.unwrap();
+        assert_eq!(r.status(), 200);
+        let r = app.clone().oneshot(post("/v1/repos/r/refs/release/probe", &reader, json!({"expected": c1, "new": c2}))).await.unwrap();
+        assert_eq!(r.status(), 403);
+        let t = text(r).await;
+        assert!(!t.contains("acquisition") && t.contains("cannot read"), "{t}");
+        // 5: a reader cannot create release branches; a writer only at history on main
+        let r = app.clone().oneshot(post("/v1/repos/r/refs/release/x", &reader, json!({"expected": null, "new": c1}))).await.unwrap();
+        assert_eq!(r.status(), 403);
+        e.set_acl("r", &a, "proj/pub", "user:rita", Some(Perm::Write)).unwrap();
+        let draft = e.create_changeset("r", vec![c2.clone()], "rita", "draft", vec![fc("proj/pub/b", "2\n")]).unwrap().id;
+        let r = app.clone().oneshot(post("/v1/repos/r/refs/release/x", &reader, json!({"expected": null, "new": draft}))).await.unwrap();
+        assert_eq!(r.status(), 403, "unreviewed draft cannot become a release");
+        let r = app.clone().oneshot(post("/v1/repos/r/refs/release/x", &reader, json!({"expected": null, "new": c1}))).await.unwrap();
+        assert_eq!(r.status(), 200, "history already on main is fine");
+        // low: log of a hidden path answers like a missing one
+        let r = app.clone().oneshot(get("/v1/repos/r/log?rev=main&path=proj/priv", &reader, None)).await.unwrap();
+        assert_eq!(r.status(), 403);
+        // 2: directory listing never shows a hidden changeset's message
+        let sid = e.create_session(&Principal { user: "rita".into(), groups: vec![] }, 3600, &reader, None).unwrap();
+        let r = app
+            .clone()
+            .oneshot(Req::get("/ui/r/code?path=proj").header("cookie", format!("cambium_session={sid}")).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let t = text(r).await;
+        assert!(t.contains("pub/") && !t.contains("SECRET") && !t.contains("priv"), "listing leaked: {t}");
+        // low: an unreferenced blob is readable only by its uploader
+        let up = e.put_blob_as(b"not committed yet", &a).unwrap();
+        assert_eq!(app.clone().oneshot(get(&format!("/v1/blobs/{up}"), &alice, None)).await.unwrap().status(), 200);
+        assert_eq!(app.clone().oneshot(get(&format!("/v1/blobs/{up}"), &reader, None)).await.unwrap().status(), 404);
+        // low: cross-site sign-in refused
+        let login = |site: &'static str| {
+            Req::post("/ui/login")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .header("sec-fetch-site", site)
+                .body(Body::from(format!("token={alice}")))
+                .unwrap()
+        };
+        assert_eq!(app.clone().oneshot(login("cross-site")).await.unwrap().status(), 403);
+        assert_eq!(app.clone().oneshot(login("same-origin")).await.unwrap().status(), 303);
+        // low: CAMBIUM_REPO_CREATORS limits who may create repositories
+        let who = |u: &str, g: &[&str]| Principal { user: u.into(), groups: g.iter().map(|x| x.to_string()).collect() };
+        assert!(creator_allowed("", &who("anyone", &[])), "unset = anyone");
+        assert!(creator_allowed("group:platform, user:alice", &who("alice", &[])));
+        assert!(creator_allowed("group:platform, user:alice", &who("bob", &["platform"])));
+        assert!(!creator_allowed("group:platform, user:alice", &who("rita", &["eng"])));
+    }
+
     // ---------- OIDC + per-directory permissions over HTTP ----------
     /// A throwaway RSA key made fresh for this test run (never written to the repo).
     struct TestIdp {
@@ -1497,7 +1609,7 @@ mod tests {
         assert_eq!(app.clone().oneshot(get(&format!("/v1/blobs/{pay_blob}"), &dev, None)).await.unwrap().status(), 404);
         assert_eq!(app.clone().oneshot(get(&format!("/v1/blobs/{pay_blob}"), &payer, None)).await.unwrap().status(), 200);
         // writes: reader gets 403, pay group may write under pay/
-        let blob = e.blobs.put(b"new\n").unwrap();
+        let blob = e.put_blob_as(b"new\n", &Principal { user: "payer".into(), groups: vec![] }).unwrap();
         let body = |p: &str, head: &str| json!({"ref": "main", "expected": head, "message": "m", "files": [{"path": p, "blob": blob}]});
         assert_eq!(app.clone().oneshot(post(&dev, "/v1/repos/r/commit", body("pub/x", &c.id))).await.unwrap().status(), 403);
         assert_eq!(app.clone().oneshot(post(&payer, "/v1/repos/r/commit", body("pub/x", &c.id))).await.unwrap().status(), 403);

@@ -157,7 +157,12 @@ async fn code(State(st): State<St>, h: HeaderMap, Path(r): Path<String>, Query(l
         for (i, e) in entries.iter().enumerate() {
             let p = join(&path, &e.name);
             // last change per entry (path history index); bounded for huge directories
-            let last = if i < 200 { st.log(&r, &cs, Some(&p), 1).ok().and_then(|v| v.into_iter().next()) } else { None };
+            // last change this user may see (changesets touching only hidden files are skipped)
+            let last = if i < 200 {
+                st.log(&r, &cs, Some(&p), if az.open() { 1 } else { 20 }).ok().and_then(|v| v.into_iter().find_map(|c| redact(&az, c)))
+            } else {
+                None
+            };
             let last = last.map_or(String::new(), |c| {
                 format!(
                     "<a href=\"/ui/{}/cs/{}\" class=muted>{}</a> <span class=muted>{}</span>",

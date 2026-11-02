@@ -46,16 +46,52 @@ async fn remove(State(st): State<St>, h: HeaderMap, Path((r, id)): Path<(String,
 fn local_ok() -> bool {
     std::env::var("CAMBIUM_WEBHOOK_ALLOW_LOCAL").is_ok_and(|v| v == "1")
 }
+fn forbidden_v4(v: std::net::Ipv4Addr) -> bool {
+    v.is_loopback()
+        || v.is_link_local()
+        || v.octets()[0] == 0
+        || v.is_multicast()
+        || v.is_broadcast()
+        || v == std::net::Ipv4Addr::new(100, 100, 100, 200) // Alibaba Cloud metadata
+}
 fn forbidden_ip(ip: IpAddr) -> bool {
     match ip {
-        IpAddr::V4(v) => v.is_loopback() || v.is_link_local() || v.is_unspecified() || v.is_multicast() || v.is_broadcast(),
+        IpAddr::V4(v) => forbidden_v4(v),
         IpAddr::V6(v) => {
+            let s = v.segments();
+            // IPv4 hidden inside IPv6: mapped (::ffff:a.b.c.d), compatible (::a.b.c.d), NAT64 (64:ff9b::/96)
+            let embedded = v.to_ipv4_mapped().or_else(|| {
+                ((s[..6] == [0, 0, 0, 0, 0, 0] && !v.is_loopback() && !v.is_unspecified()) || s[..6] == [0x64, 0xff9b, 0, 0, 0, 0])
+                    .then(|| std::net::Ipv4Addr::new((s[6] >> 8) as u8, s[6] as u8, (s[7] >> 8) as u8, s[7] as u8))
+            });
             v.is_loopback()
                 || v.is_unspecified()
                 || v.is_multicast()
-                || (v.segments()[0] & 0xffc0) == 0xfe80
-                || v.to_ipv4_mapped().is_some_and(|m| forbidden_ip(IpAddr::V4(m)))
+                || (s[0] & 0xffc0) == 0xfe80
+                || v == std::net::Ipv6Addr::new(0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x254) // AWS metadata (IPv6)
+                || embedded.is_some_and(forbidden_v4)
         }
+    }
+}
+/// Resolver for deliveries: the addresses checked are exactly the ones connected to,
+/// so DNS rebinding between a check and the request cannot reach blocked addresses.
+struct SafeResolver;
+impl ureq::Resolver for SafeResolver {
+    fn resolve(&self, netloc: &str) -> std::io::Result<Vec<std::net::SocketAddr>> {
+        let addrs: Vec<_> = netloc.to_socket_addrs()?.collect();
+        if !local_ok() && addrs.iter().any(|a| forbidden_ip(a.ip())) {
+            return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "blocked address"));
+        }
+        Ok(addrs)
+    }
+}
+/// Error text safe to store and show: a category, never connection details (which would
+/// make webhooks a port scanner).
+fn category(e: &ureq::Error) -> String {
+    match e {
+        ureq::Error::Status(code, _) => format!("HTTP {code}"),
+        ureq::Error::Transport(t) if t.to_string().contains("blocked address") => "blocked address".into(),
+        ureq::Error::Transport(_) => "unreachable".into(),
     }
 }
 /// Refuse targets that resolve to loopback/link-local (e.g. 169.254.169.254, the
@@ -87,45 +123,52 @@ pub fn start(eng: Arc<Engine>) {
         return;
     }
     let node = format!("{}-{:x}", std::process::id(), rand::random::<u64>());
-    let agent = ureq::AgentBuilder::new().redirects(0).timeout(std::time::Duration::from_secs(10)).build();
+    let agent = ureq::AgentBuilder::new().redirects(0).timeout(std::time::Duration::from_secs(10)).resolver(SafeResolver).build();
+    let busy: Arc<std::sync::Mutex<std::collections::HashSet<i64>>> = Default::default();
     std::thread::spawn(move || loop {
         std::thread::sleep(std::time::Duration::from_millis(500));
-        let Ok(hooks) = eng.claim_hooks(&node, 30) else { continue };
-        for (id, repo, url, secret, mut last) in hooks {
-            for _ in 0..20 {
-                let ev = match eng.next_ref_event(&repo, last) {
-                    Ok(Some(ev)) => ev,
-                    _ => break,
-                };
-                let (seq, payload) = ev;
-                let body = payload.to_string();
-                let sig = cambium_core::webhooks::hmac_sha256_hex(secret.as_bytes(), body.as_bytes());
-                let res = target_allowed(&url).and_then(|_| {
-                    agent
-                        .post(&url)
-                        .set("content-type", "application/json")
-                        .set("user-agent", "cambium-webhook")
-                        .set("x-cambium-event", "ref")
-                        .set("x-cambium-delivery", &format!("{id}-{seq}"))
-                        .set("x-cambium-signature", &format!("sha256={sig}"))
-                        .send_string(&body)
-                        .map(|_| ())
-                        .map_err(|e| e.to_string())
-                });
-                match res {
-                    Ok(()) => {
-                        let _ = eng.hook_delivered(id, seq);
-                        last = seq;
-                    }
-                    Err(e) => {
-                        cambium_core::log::error("webhook delivery failed", json!({"hook": id, "seq": seq, "error": e}));
-                        let _ = eng.hook_failed(id, &e);
-                        break;
-                    }
-                }
+        // lease 120 s > worst case per pass (5 events x 10 s timeout)
+        let Ok(hooks) = eng.claim_hooks(&node, 120) else { continue };
+        for (id, repo, url, secret, last) in hooks {
+            // one thread per hook: a slow receiver only delays its own repository
+            if !busy.lock().unwrap().insert(id) {
+                continue;
             }
+            let (eng, agent, busy) = (eng.clone(), agent.clone(), busy.clone());
+            std::thread::spawn(move || {
+                deliver(&eng, &agent, id, &repo, &url, &secret, last);
+                busy.lock().unwrap().remove(&id);
+            });
         }
     });
+}
+
+fn deliver(eng: &Engine, agent: &ureq::Agent, id: i64, repo: &str, url: &str, secret: &str, mut last: i64) {
+    for _ in 0..5 {
+        let Ok(Some((seq, payload))) = eng.next_ref_event(repo, last) else { break };
+        let body = payload.to_string();
+        let sig = cambium_core::webhooks::hmac_sha256_hex(secret.as_bytes(), body.as_bytes());
+        let res = agent
+            .post(url)
+            .set("content-type", "application/json")
+            .set("user-agent", "cambium-webhook")
+            .set("x-cambium-event", "ref")
+            .set("x-cambium-delivery", &format!("{id}-{seq}"))
+            .set("x-cambium-signature", &format!("sha256={sig}"))
+            .send_string(&body);
+        match res {
+            Ok(_) => {
+                let _ = eng.hook_delivered(id, seq);
+                last = seq;
+            }
+            Err(e) => {
+                let why = category(&e);
+                cambium_core::log::error("webhook delivery failed", json!({"hook": id, "seq": seq, "error": why}));
+                let _ = eng.hook_failed(id, &why);
+                break;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -144,5 +187,11 @@ mod tests {
         }
         assert!(super::target_allowed("http://10.1.2.3:8080/ci").is_ok(), "private CI addresses are fine");
         assert!(super::target_allowed("ftp://x").is_err());
+        for ip in ["100.100.100.200", "0.1.2.3", "fd00:ec2::254", "::127.0.0.1", "64:ff9b::a9fe:a9fe", "::ffff:169.254.169.254"] {
+            assert!(super::forbidden_ip(ip.parse().unwrap()), "{ip}");
+        }
+        for ip in ["10.1.2.3", "192.168.1.5", "2001:db8::1", "fd12::1"] {
+            assert!(!super::forbidden_ip(ip.parse().unwrap()), "{ip}");
+        }
     }
 }

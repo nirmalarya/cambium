@@ -55,8 +55,9 @@ fn reader(st: &St, h: &HeaderMap, r: &str) -> Result<(Principal, cambium_core::A
     Ok((u, az))
 }
 async fn list(State(st): State<St>, h: HeaderMap, Path(r): Path<String>, Query(q): Query<StateQ>) -> R {
-    reader(&st, &h, &r)?;
-    Ok(Json(json!(st.reviews(&r, q.state.as_deref())?)))
+    let (_, az) = reader(&st, &h, &r)?;
+    let all = st.reviews(&r, q.state.as_deref())?;
+    Ok(Json(json!(all.into_iter().filter(|rv| review_visible(&st, &az, &r, rv)).collect::<Vec<_>>())))
 }
 async fn create(State(st): State<St>, h: HeaderMap, Path(r): Path<String>, Json(b): Json<NewReview>) -> R {
     let (u, _) = reader(&st, &h, &r)?;
@@ -80,6 +81,20 @@ fn changed_paths(st: &St, r: &str, rv: &cambium_core::review::Review) -> Result<
     out.extend(mb.keys().filter(|k| !ms.contains_key(*k)).cloned());
     Ok(out)
 }
+/// A review is visible only to people who can read every path it changes, so its title,
+/// change kind, code owners and comments never reveal hidden work.
+pub(crate) fn review_visible(st: &St, az: &cambium_core::Authz, r: &str, rv: &cambium_core::review::Review) -> bool {
+    az.open() || changed_paths(st, r, rv).is_ok_and(|ps| ps.iter().all(|p| az.can(p, Perm::Read)))
+}
+/// The review, or "not found" when the caller may not see it.
+fn visible_review(st: &St, az: &cambium_core::Authz, r: &str, id: i64) -> Result<cambium_core::review::Review, ApiErr> {
+    let rv = st.review(r, id)?;
+    if review_visible(st, az, r, &rv) {
+        Ok(rv)
+    } else {
+        Err(ApiErr(Error::NotFound(format!("review {id}"))))
+    }
+}
 /// An approval only counts from someone who can see everything it approves.
 pub(crate) fn approve_checked(st: &St, az: &cambium_core::Authz, r: &str, id: i64, u: &Principal) -> Result<(), ApiErr> {
     let rv = st.review(r, id)?;
@@ -95,12 +110,13 @@ fn visible_comments(st: &St, az: &cambium_core::Authz, r: &str, id: i64) -> Resu
 }
 async fn show(State(st): State<St>, h: HeaderMap, Path((r, id)): Path<(String, i64)>) -> R {
     let (_, az) = reader(&st, &h, &r)?;
-    let rv = st.review(&r, id)?;
+    let rv = visible_review(&st, &az, &r, id)?;
     let diff = review_diff(&st, &az, &r, &rv)?;
     Ok(Json(json!({"review": rv, "comments": visible_comments(&st, &az, &r, id)?, "diff": diff})))
 }
 async fn comment(State(st): State<St>, h: HeaderMap, Path((r, id)): Path<(String, i64)>, Json(b): Json<NewComment>) -> R {
     let (u, az) = reader(&st, &h, &r)?;
+    visible_review(&st, &az, &r, id)?;
     if let Some(p) = b.path.as_deref().filter(|p| !p.is_empty()) {
         need(az.can(p, Perm::Read), &format!("read on {p}"))?;
     }
@@ -270,7 +286,22 @@ async fn login_form() -> Html<String> {
 struct Login {
     token: String,
 }
-async fn login(State(st): State<St>, Form(f): Form<Login>) -> Response {
+/// Sign-in has no session yet to derive a CSRF value from, so refuse cross-site posts
+/// (login CSRF) using the browser's own headers.
+fn same_origin(h: &HeaderMap) -> bool {
+    if h.get("sec-fetch-site").and_then(|v| v.to_str().ok()).is_some_and(|v| v == "cross-site" || v == "same-site") {
+        return false;
+    }
+    match (h.get("origin").and_then(|v| v.to_str().ok()), h.get("host").and_then(|v| v.to_str().ok())) {
+        (Some(o), Some(host)) => o.split_once("://").is_some_and(|(_, rest)| rest == host),
+        (Some(_), None) => false,
+        _ => true, // non-browser clients send neither
+    }
+}
+async fn login(State(st): State<St>, h: HeaderMap, Form(f): Form<Login>) -> Response {
+    if !same_origin(&h) {
+        return ui_err("sign-in must come from this site", StatusCode::FORBIDDEN);
+    }
     let t = f.token.trim().to_string();
     let who = match crate::auth::authenticate(&st.eng, st.oidc.as_ref(), &t) {
         Ok(p) if !t.is_empty() => p,
@@ -314,7 +345,7 @@ async fn home(State(st): State<St>, h: HeaderMap) -> Response {
         if !az.can_any(Perm::Read) {
             continue;
         }
-        let open = st.reviews(&r, Some("open")).map(|v| v.len()).unwrap_or(0);
+        let open = st.reviews(&r, Some("open")).map(|v| v.into_iter().filter(|rv| review_visible(&st, &az, &r, rv)).count()).unwrap_or(0);
         rows.push_str(&format!(
             "<tr><td><a href=\"/ui/{0}/code\">{0}</a></td><td><a href=\"/ui/{0}/history\">history</a></td><td><a href=\"/ui/{0}\">{open} open review(s)</a></td></tr>",
             esc(&r)
@@ -345,7 +376,7 @@ async fn repo_page(State(st): State<St>, h: HeaderMap, Path(r): Path<String>) ->
         return ui_err("you do not have read access to this repository", StatusCode::FORBIDDEN);
     }
     let mut rows = String::new();
-    for rv in st.reviews(&r, None).unwrap_or_default() {
+    for rv in st.reviews(&r, None).unwrap_or_default().into_iter().filter(|rv| review_visible(&st, &az, &r, rv)) {
         let badge = match rv.state.as_str() {
             "merged" => "ok",
             "closed" => "",
@@ -400,9 +431,9 @@ async fn review_page(State(st): State<St>, h: HeaderMap, Path((r, id)): Path<(St
     if !az.can_any(Perm::Read) {
         return ui_err("you do not have read access to this repository", StatusCode::FORBIDDEN);
     }
-    let rv = match st.review(&r, id) {
+    let rv = match visible_review(&st, &az, &r, id) {
         Ok(x) => x,
-        Err(e) => return api_to_ui(ApiErr(e)),
+        Err(e) => return api_to_ui(e),
     };
     let diff = match review_diff(&st, &az, &r, &rv) {
         Ok(d) => d,
@@ -497,6 +528,9 @@ fn ui_act(
     };
     if !az.can_any(Perm::Read) {
         return ui_err("no read access", StatusCode::FORBIDDEN);
+    }
+    if let Err(e) = visible_review(st, &az, r, id) {
+        return api_to_ui(e);
     }
     match f(st, &u, &az) {
         Ok(()) => Redirect::to(&format!("/ui/{r}/reviews/{id}")).into_response(),
