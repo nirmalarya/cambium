@@ -20,4 +20,5 @@ pub mod semantic;
 pub mod text;
 pub mod tokens;
 pub mod tree;
+pub mod webhooks;
 pub use engine::{AclRule, Authz, Changeset, Engine, Error, FileChange, Perm, Principal};

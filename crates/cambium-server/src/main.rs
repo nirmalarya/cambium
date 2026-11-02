@@ -27,6 +27,7 @@ mod admin;
 mod auth;
 mod browse;
 mod edge;
+mod hooks;
 mod obs;
 mod review;
 use cambium_core::{Perm, Principal};
@@ -750,6 +751,7 @@ pub fn app(st: St, lim: Arc<RateLimiter>) -> Router {
         .merge(review::api())
         .merge(review::ui())
         .merge(browse::ui())
+        .merge(hooks::api())
         .layer(middleware::from_fn_with_state(st.clone(), idempotent))
         .layer(middleware::from_fn_with_state((st.clone(), lim), limit))
         .layer(DefaultBodyLimit::max(max_body()))
@@ -846,6 +848,7 @@ fn main() {
         o
     });
     let ctx = Arc::new(Ctx { eng, oidc });
+    hooks::start(ctx.eng.clone());
     let rt = tokio::runtime::Runtime::new().expect("runtime");
     rt.block_on(serve(ctx, data));
     // don't wait for idle blocking-pool threads or pool workers on the way out

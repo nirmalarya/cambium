@@ -100,3 +100,15 @@ On the build box, dockerd has no bridge network, so builds use `--network host` 
 
 ## Production checklist
 See rollout-checklist.md. Items that could not be verified on the build box are listed there and in the final report.
+
+## Webhooks for CI
+Repo admins register endpoints with `cmb hook add <url> --secret <secret>` (or
+`POST /v1/repos/<repo>/hooks`). Every move of `main` or a `release/*` branch is POSTed as
+JSON (`event`, `repo`, `ref`, `before`, `after`, `changesets`) with
+`X-Cambium-Event: ref`, `X-Cambium-Delivery: <hook>-<seq>` (stable across retries; use
+it to de-duplicate) and `X-Cambium-Signature: sha256=<HMAC-SHA256(secret, body)>`.
+Deliveries come from the write-ahead log in order, at least once, and are retried with
+exponential backoff (5 s up to 1 h); `cmb hook list` shows the last error. With several
+cmbd nodes, a lease makes one node deliver each hook. Targets that resolve to loopback
+or link-local addresses (including the cloud metadata service) are refused unless
+`CAMBIUM_WEBHOOK_ALLOW_LOCAL=1`; `CAMBIUM_WEBHOOKS=0` turns delivery off on a node.

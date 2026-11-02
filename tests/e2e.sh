@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # End-to-end: real cmbd server + cmb client, every command in the vertical slice.
 set -u
+HERE=$(cd "$(dirname "$0")" && pwd)
 BIN=${BIN:-${CARGO_TARGET_DIR:-$PWD/target}/debug}
 T=$(mktemp -d); export CAMBIUM_DATA=$T/data CAMBIUM_ADDR=127.0.0.1:${PORT:-7979} CAMBIUM_CACHE=$T/cache
 export CAMBIUM_SERVER=http://$CAMBIUM_ADDR
+export CAMBIUM_WEBHOOK_ALLOW_LOCAL=1   # the test receiver listens on 127.0.0.1
 pass=0; fail=0
 # portable helpers (GNU/Linux and macOS/BSD)
 fmode(){ stat -c %a "$1" 2>/dev/null || python3 -c 'import os,sys; print(format(os.stat(sys.argv[1]).st_mode & 0o7777, "o"))' "$1"; }
@@ -58,6 +60,16 @@ GOOD=$(cd $T/bs && cmb log -n 20 | tail -1 | cut -c1-12)
 ok "B01 cmb bisect --run finds the first bad changeset" '(cd $T/bs && cmb bisect $GOOD main --run "grep -qx fine status" 2>/dev/null | grep -q "first bad: .* step 13$" && [ -e steps/20 ])'
 BADC=$(cd $T/bs && cmb log -n 8 | tail -1 | cut -c1-12)
 ok "B02 cmb revert undoes it on top of later work" '(cd $T/bs && cmb log -n 8 | tail -1 | grep -q "step 13" && cmb revert $BADC | grep -q reverted && grep -qx fine status && [ ! -e steps/13 ] && [ -e steps/20 ])'
+# ---------- webhooks for CI (post-merge testing) ----------
+HP=$((${PORT:-7979}+30)); HSECRET=e2e-hook-secret-0123456789
+python3 "$HERE/support/hook_receiver.py" $HP $HSECRET $T/hooks.jsonl & HOOKRX=$!
+sleep 0.5
+ok "H01 repo admin adds a webhook" '(cd $T/bs && cmb hook add http://127.0.0.1:$HP/ci --secret $HSECRET | grep -q "webhook .* added")'
+(cd $T/bs && echo hooked > steps/hook && cmb add steps >/dev/null && cmb commit -m "trigger ci" >/dev/null)
+for i in $(seq 40); do [ -s $T/hooks.jsonl ] && break; sleep 0.25; done
+ok "H02 landing on main is delivered, signed, with the new changeset" 'python3 -c "import json,sys; r=[json.loads(l) for l in open(sys.argv[1])][-1]; assert r[\"event\"]==\"ref\" and r[\"signature_ok\"] and r[\"payload\"][\"ref\"]==\"main\" and r[\"payload\"][\"changesets\"][0][\"message\"]==\"trigger ci\"" $T/hooks.jsonl'
+ok "H03 hook list shows it delivered" '(cd $T/bs && cmb hook list | grep -q "failures 0")'
+kill $HOOKRX 2>/dev/null
 ok "F02 commit after main moved is rebased, not refused" '(cd sp && echo z > src/z.rs && cmb add src >/dev/null && (cd ../wc2 && cmb sync >/dev/null 2>&1; echo q2 > docs/q2.md && cmb add docs && cmb commit -m q2) >/dev/null 2>&1 && cmb commit -m z | grep -q "^\[main" && [ -e docs/q2.md ])'
 ok "F08 cache bounded" 'CAMBIUM_CACHE_MAX=1 cmb checkout demo tiny >/dev/null 2>&1; [ $(ls $CAMBIUM_CACHE | wc -l) -le 1 ]'
 HEAD_ID=$(curl -s -H "Authorization: Bearer $CAMBIUM_TOKEN" $CAMBIUM_SERVER/v1/repos/demo/resolve/main | python3 -c 'import sys,json; print(json.load(sys.stdin)["cs"])')

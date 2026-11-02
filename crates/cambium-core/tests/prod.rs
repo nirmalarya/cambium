@@ -228,3 +228,39 @@ fn backup_restore_round_trip() {
     assert!(g.restore(&d.path().join("bk")).is_err(), "checksum mismatch refused");
     assert!(man.exists());
 }
+
+#[test]
+fn webhooks_events_leases_and_backoff() {
+    let (e, _d) = eng();
+    let root = e.create_repo("r", "alice").unwrap();
+    let c1 = e.commit("r", "main", &root, "alice", "before the hook", vec![put(&e, "a", "1\n")]).unwrap().id;
+    let alice = Principal::new("alice");
+    assert!(e.add_hook("r", &Principal::new("mallory"), "https://ci.example.test/hook", "0123456789abcdef").is_err(), "admins only");
+    assert!(e.add_hook("r", &alice, "https://ci.example.test/hook", "short").is_err(), "secret too short");
+    let id = e.add_hook("r", &alice, "https://ci.example.test/hook", "0123456789abcdef").unwrap();
+    // nothing to deliver yet: events before the hook was added are not replayed
+    assert!(e.claim_hooks("node-a", 30).unwrap().is_empty());
+    let c2 = e.commit("r", "main", &c1, "bob", "first", vec![put(&e, "b", "1\n")]).unwrap().id;
+    let c3 = e.commit("r", "main", &c2, "bob", "second", vec![put(&e, "c", "1\n")]).unwrap().id;
+    // one node wins the lease
+    let a = e.claim_hooks("node-a", 30).unwrap();
+    assert_eq!(a.len(), 1);
+    assert!(e.claim_hooks("node-b", 30).unwrap().is_empty(), "node-b must not deliver the same hook");
+    let (hid, _, _, _, last) = a[0].clone();
+    let (s1, ev1) = e.next_ref_event("r", last).unwrap().unwrap();
+    assert_eq!((ev1["ref"].as_str(), ev1["before"].as_str(), ev1["after"].as_str()), (Some("main"), Some(c1.as_str()), Some(c2.as_str())));
+    assert_eq!(ev1["changesets"].as_array().unwrap().len(), 1);
+    assert_eq!(ev1["changesets"][0]["message"], "first");
+    // failure: back off, keep the event
+    e.hook_failed(hid, "connection refused").unwrap();
+    assert_eq!(e.list_hooks("r", &alice).unwrap()[0].failures, 1);
+    assert!(e.claim_hooks("node-a", 30).unwrap().is_empty(), "backing off");
+    // success moves the cursor; the next event is the second commit
+    e.hook_delivered(hid, s1).unwrap();
+    let (_, ev2) = e.next_ref_event("r", s1).unwrap().unwrap();
+    assert_eq!(ev2["after"].as_str(), Some(c3.as_str()));
+    let h = &e.list_hooks("r", &alice).unwrap()[0];
+    assert_eq!((h.failures, h.last_seq), (0, s1));
+    e.remove_hook("r", &alice, id).unwrap();
+    assert!(e.list_hooks("r", &alice).unwrap().is_empty());
+}

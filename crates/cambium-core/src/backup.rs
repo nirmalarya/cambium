@@ -32,10 +32,11 @@ pub const TABLES: &[(&str, &str, &str)] = &[
     ("blob_uploads", "blob,principal,created_at", "blob,principal"),
     ("trees", "id,body", "id"),
     ("git_import_map", "repo,git_sha,cs_id", "repo,git_sha"),
+    ("webhooks", "id,repo,url,secret,created_by,created_at,last_seq,failures,next_attempt,last_error,lease_owner,lease_until", "id"),
     ("tree_paths", "tree_id,repo,path", "tree_id,repo,path"),
     ("audit_log", "seq,ts,actor,action,repo,target,outcome,detail,request_id,prev_hash,hash", "seq"),
 ];
-const SERIALS: &[(&str, &str)] = &[("wal", "seq"), ("reviews", "id"), ("review_comments", "id"), ("audit_log", "seq")];
+const SERIALS: &[(&str, &str)] = &[("wal", "seq"), ("reviews", "id"), ("review_comments", "id"), ("audit_log", "seq"), ("webhooks", "id")];
 
 fn to_json(v: &Val) -> Value {
     match v {

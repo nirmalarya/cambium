@@ -846,6 +846,7 @@ const HELP: &str = "cmb - thin client for a Cambium server
   cmb acl rm <prefix> <principal>       remove a rule
   cmb review create -m <title> [--target main]
                                        ask for review of the current branch
+  cmb hook [list] | add <url> --secret S | rm <id>   webhooks for CI: every move of main / release/*
   cmb protect <branch> <n> [--trivial N|off]  need n approvals (N for docs/comment-only changes)
   cmb review update <n>                 point review <n> at your current drafts (old approvals lapse)
   cmb review [list] | show <n> | comment <n> <text> | approve <n> | merge <n> | close <n>
@@ -1326,6 +1327,41 @@ fn run_wc(cmd: &str, mut args: Vec<String>, c: &Client, root: &Path, s: &mut Sta
                 _ => die("usage: cmb review [list | create -m <title> [--target B] | update <n> | show <n> | comment <n> <text> | approve <n> | merge <n> | close <n>]"),
             }
         }
+        "hook" => match args.first().map(String::as_str) {
+            // cmb hook add <url> --secret S | cmb hook [list] | cmb hook rm <id>   (repo admins)
+            Some("add") => {
+                let secret =
+                    flag(&mut args, "--secret").unwrap_or_else(|| die("usage: cmb hook add <url> --secret <at least 16 characters>"));
+                let url = args.get(1).cloned().unwrap_or_else(|| die("usage: cmb hook add <url> --secret <secret>"));
+                let v = c.post(&format!("/v1/repos/{repo}/hooks"), json!({"url": url, "secret": secret}));
+                println!("webhook {} added: {url} (receives every move of main and release/*)", v["id"]);
+            }
+            Some("rm") => {
+                let id = args.get(1).cloned().unwrap_or_else(|| die("usage: cmb hook rm <id>"));
+                let r = http()
+                    .delete(&format!("{}/v1/repos/{repo}/hooks/{id}", c.server))
+                    .set("Authorization", &format!("Bearer {}", c.token))
+                    .call();
+                match r {
+                    Ok(_) => println!("webhook {id} removed"),
+                    Err(ureq::Error::Status(_, resp)) => die(err_message(&resp.into_json().unwrap_or(Value::Null))),
+                    Err(e) => die(format!("cannot reach server: {e}")),
+                }
+            }
+            None | Some("list") => {
+                for h in c.get(&format!("/v1/repos/{repo}/hooks"), &[]).as_array().unwrap() {
+                    let err = h["last_error"].as_str().map(|e| format!("  last error: {e}")).unwrap_or_default();
+                    println!(
+                        "{:<4} {}  delivered up to {}  failures {}{err}",
+                        h["id"],
+                        h["url"].as_str().unwrap_or(""),
+                        h["last_seq"],
+                        h["failures"]
+                    );
+                }
+            }
+            _ => die("usage: cmb hook [list] | add <url> --secret S | rm <id>"),
+        },
         "acl" => match args.first().map(String::as_str) {
             Some("set") | Some("rm") => {
                 let rm = args[0] == "rm";
