@@ -12,6 +12,7 @@ pub mod gitimport;
 pub mod limits;
 pub mod log;
 pub mod migrate;
+pub mod pipelines;
 pub mod review;
 pub mod s3;
 pub mod search;

@@ -765,6 +765,8 @@ const HELP: &str = "cmb - thin client for a Cambium server
   cmb switch <main|release/NAME>        move the working copy to another branch
   cmb sync                              update to the branch head (drafts are rebased onto it)
   cmb merge <rev>                       server merges <rev> (e.g. a release fix) into the current branch
+  cmb revert <rev>                      undo a changeset on top of the branch head (server-side)
+  cmb bisect <good> <bad> [--run <cmd>] find the first bad changeset (with --run: exit 0 = good)
   cmb log [path] [-n N]                 history (first-parent), optionally for a path
   cmb blame <path>                      per-line origin, computed on the server
   cmb search <text> [--rev R] [-n N]    indexed search of paths and contents (only files you may read)
@@ -1075,6 +1077,52 @@ fn run_wc(cmd: &str, mut args: Vec<String>, c: &Client, root: &Path, s: &mut Sta
             println!("merged {src} into {} as {}", s.branch, short(v["id"].as_str().unwrap()));
             let b = s.branch.clone();
             materialise(c, root, s, &b);
+        }
+        "revert" => {
+            let rev = args.first().cloned().unwrap_or_else(|| die("usage: cmb revert <rev>"));
+            if !changes(root, s).is_empty() || s.drafts.is_some() {
+                die("land or discard local changes and drafts before reverting");
+            }
+            let b = s.branch.clone();
+            let v = c.post_idem(&format!("/v1/repos/{repo}/revert"), json!({"cs": rev, "onto": b}));
+            let tip = v["cs"].as_str().unwrap().to_string();
+            println!("[{b} {}] reverted {rev}", short(&tip));
+            materialise(c, root, s, &b);
+        }
+        "bisect" => {
+            // cmb bisect <good> <bad> [--run <command>]
+            let run = flag(&mut args, "--run");
+            let (Some(mut good), Some(mut bad)) = (args.first().cloned(), args.get(1).cloned()) else {
+                die("usage: cmb bisect <good> <bad> [--run <command>]  (with --run: exit 0 = good)")
+            };
+            if run.is_some() && (!changes(root, s).is_empty() || s.drafts.is_some()) {
+                die("bisect --run needs a clean working copy without drafts");
+            }
+            let back = s.branch.clone();
+            let found = loop {
+                let v = c.get(&format!("/v1/repos/{repo}/bisect"), &[("good", &good), ("bad", &bad)]);
+                if let Some(f) = v["first_bad"].as_str() {
+                    break f.to_string();
+                }
+                let next = v["next"].as_str().unwrap().to_string();
+                let Some(cmd) = &run else {
+                    println!("test {} next (about {} changesets left); then: cmb bisect <good> <bad>", short(&next), v["span"]);
+                    return;
+                };
+                materialise(c, root, s, &next);
+                let ok = std::process::Command::new("sh").arg("-c").arg(cmd).current_dir(root).status().is_ok_and(|x| x.success());
+                eprintln!("cmb: {} is {}", short(&next), if ok { "good" } else { "bad" });
+                if ok {
+                    good = next
+                } else {
+                    bad = next
+                }
+            };
+            if run.is_some() {
+                materialise(c, root, s, &back);
+            }
+            let cs = c.get(&format!("/v1/repos/{repo}/changesets/{found}"), &[]);
+            println!("first bad: {} {}", short(&found), cs["message"].as_str().unwrap_or("").lines().next().unwrap_or(""));
         }
         "rebase" => die("`cmb rebase` is gone: `cmb sync` rebases your drafts onto the latest head, and landing always rebases"),
         "log" => {

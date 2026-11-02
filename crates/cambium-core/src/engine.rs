@@ -930,6 +930,14 @@ impl Engine {
         Ok(cs)
     }
 
+    pub(crate) fn merge3_manifests(
+        &self,
+        base: &Manifest,
+        ours: &Manifest,
+        theirs: &Manifest,
+    ) -> Result<std::result::Result<Manifest, Vec<String>>> {
+        self.merge_manifests(base, ours, theirs)
+    }
     fn merge_manifests(&self, base: &Manifest, ours: &Manifest, theirs: &Manifest) -> Result<std::result::Result<Manifest, Vec<String>>> {
         let mut out = ours.clone();
         let mut conflicts = vec![];

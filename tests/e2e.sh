@@ -52,6 +52,12 @@ ok "F07 API-only read (no working copy)" 'cmb cat demo main src/lib.rs | grep -q
 (cd $T && cmb checkout trees tr2 >/dev/null 2>&1)
 (cd $T/tr && echo changed > a/x && cmb add a >/dev/null && cmb commit -m "only a" >/dev/null)
 ok "T01 sync fetches only the changed trees (root + a), reuses b and c" '(cd $T/tr2 && CAMBIUM_STATS=1 cmb sync 2>&1 | grep -q "trees 2 fetched, 2 unchanged" && grep -q changed a/x)'
+# ---------- pipelines: bisect and revert ----------
+(cd $T && cmb init bis bs >/dev/null 2>&1 && cd bs && for n in $(seq 1 20); do if [ $n -ge 13 ]; then echo broken > status; else echo fine > status; fi; mkdir -p steps; echo $n > steps/$n; cmb add status steps >/dev/null 2>&1; cmb commit -m "step $n" >/dev/null; done)
+GOOD=$(cd $T/bs && cmb log -n 20 | tail -1 | cut -c1-12)
+ok "B01 cmb bisect --run finds the first bad changeset" '(cd $T/bs && cmb bisect $GOOD main --run "grep -qx fine status" 2>/dev/null | grep -q "first bad: .* step 13$" && [ -e steps/20 ])'
+BADC=$(cd $T/bs && cmb log -n 8 | tail -1 | cut -c1-12)
+ok "B02 cmb revert undoes it on top of later work" '(cd $T/bs && cmb log -n 8 | tail -1 | grep -q "step 13" && cmb revert $BADC | grep -q reverted && grep -qx fine status && [ ! -e steps/13 ] && [ -e steps/20 ])'
 ok "F02 commit after main moved is rebased, not refused" '(cd sp && echo z > src/z.rs && cmb add src >/dev/null && (cd ../wc2 && cmb sync >/dev/null 2>&1; echo q2 > docs/q2.md && cmb add docs && cmb commit -m q2) >/dev/null 2>&1 && cmb commit -m z | grep -q "^\[main" && [ -e docs/q2.md ])'
 ok "F08 cache bounded" 'CAMBIUM_CACHE_MAX=1 cmb checkout demo tiny >/dev/null 2>&1; [ $(ls $CAMBIUM_CACHE | wc -l) -le 1 ]'
 HEAD_ID=$(curl -s -H "Authorization: Bearer $CAMBIUM_TOKEN" $CAMBIUM_SERVER/v1/repos/demo/resolve/main | python3 -c 'import sys,json; print(json.load(sys.stdin)["cs"])')

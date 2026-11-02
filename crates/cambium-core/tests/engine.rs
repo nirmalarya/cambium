@@ -714,3 +714,49 @@ fn skip_lists_and_fast_ancestry() {
     assert_eq!(n, 303, "root + 300 + side + merge, each derived eagerly exactly once");
     assert_eq!(e.backfill_derived().unwrap(), 303);
 }
+
+#[test]
+fn bisect_finds_the_first_bad_changeset() {
+    let (e, _d) = eng();
+    let root = e.create_repo("r", "u").unwrap();
+    let mut chain = vec![root];
+    for i in 0..200 {
+        let body = if i >= 137 { "broken\n" } else { "ok\n" };
+        chain.push(e.commit("r", "main", chain.last().unwrap(), "u", "c", vec![put(&e, "status", body)]).unwrap().id);
+    }
+    let is_bad = |cs: &str| read(&e, cs, "status") == "broken\n";
+    let (mut good, mut bad) = (chain[1].clone(), chain[200].clone());
+    let mut steps = 0;
+    let first = loop {
+        let s = e.bisect("r", &good, &bad).unwrap();
+        if let Some(f) = s.first_bad {
+            break f;
+        }
+        let n = s.next.unwrap();
+        assert!(n != good && n != bad);
+        if is_bad(&n) {
+            bad = n
+        } else {
+            good = n
+        }
+        steps += 1;
+        assert!(steps < 20, "bisection must converge in O(log n)");
+    };
+    assert_eq!(first, chain[138], "status first broke in the 138th commit");
+    assert!(steps <= 9, "steps {steps}");
+    assert!(e.bisect("r", &chain[50], &chain[10]).is_err(), "good after bad");
+}
+#[test]
+fn revert_undoes_a_changeset_on_top_of_later_work() {
+    let (e, _d) = eng();
+    let root = e.create_repo("r", "u").unwrap();
+    let base = e.commit("r", "main", &root, "u", "base", vec![put(&e, "f", "1\n2\n3\n4\n5\n")]).unwrap().id;
+    let bad = e.commit("r", "main", &base, "u", "bad", vec![put(&e, "f", "1\nTWO\n3\n4\n5\n"), put(&e, "new", "x\n")]).unwrap().id;
+    let later = e.commit("r", "main", &bad, "u", "later", vec![put(&e, "f", "1\nTWO\n3\n4\nFIVE\n")]).unwrap().id;
+    let r = e.revert("r", &bad, "main", "bot", &|_| Ok(())).unwrap();
+    assert_eq!(e.get_ref("r", "main").unwrap(), Some(r.clone()));
+    assert_eq!(e.get_changeset("r", &r).unwrap().parents, vec![later]);
+    assert_eq!(read(&e, &r, "f"), "1\n2\n3\n4\nFIVE\n", "only the bad change is undone");
+    assert!(!e.manifest("r", &r).unwrap().contains_key("new"));
+    assert!(e.revert("r", &bad, "main", "bot", &|_| Ok(())).is_err(), "nothing left to revert");
+}

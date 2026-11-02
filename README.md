@@ -22,7 +22,7 @@ Docker: `docker compose up --build -d`, then `docker compose exec cmbd cmbd toke
 
 ## Commands
 `init, checkout [--sparse], status, add, commit [--draft], land, sync, branch, switch, merge, log,
-blame, diff, search, sparse, cat, mount [--write], watch, acl, protect, review, whoami` — see `cmb help`.
+blame, diff, search, sparse, cat, mount [--write], watch, acl, protect, review, revert, bisect, whoami` — see `cmb help`.
 
 ## Workflow (Scion's model: no feature branches)
 - **Refs:** only `main` and `release/<name>`. Every ref move is a compare-and-swap on one row.

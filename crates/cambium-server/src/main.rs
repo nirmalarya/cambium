@@ -398,6 +398,32 @@ async fn get_tree(
     Ok(([("cache-control", if complete { "private, max-age=31536000, immutable" } else { "private, no-store" })], body).into_response())
 }
 #[derive(Deserialize)]
+struct BisectQ {
+    good: String,
+    bad: String,
+}
+/// One stateless bisection step on first-parent history (for bisect pipelines).
+async fn bisect(State(st): State<St>, h: HeaderMap, Path(r): Path<String>, Query(q): Query<BisectQ>) -> R {
+    let u = user(&st, &h)?;
+    need(st.authz(&r, &u)?.can_any(Perm::Read), "read on this repo")?;
+    Ok(Json(json!(st.bisect(&r, &q.good, &q.bad)?)))
+}
+#[derive(Deserialize)]
+struct Revert {
+    cs: String,
+    #[serde(default = "main_ref")]
+    onto: String,
+}
+/// Undo changeset `cs` on top of the current head of `onto` and land it (for revert
+/// pipelines). Protected refs only change through a review.
+async fn revert(State(st): State<St>, h: HeaderMap, Path(r): Path<String>, Json(b): Json<Revert>) -> R {
+    let u = user(&st, &h)?;
+    let az = st.authz(&r, &u)?;
+    guard_protected(&st, &r, &b.onto)?;
+    let tip = st.revert(&r, &b.cs, &b.onto, &u.user, &|f| check_writes(&az, f)).map_err(|e| hide_conflicts(e, &az))?;
+    Ok(Json(json!({"ref": b.onto, "cs": tip})))
+}
+#[derive(Deserialize)]
 struct NewChangeset {
     parent: String,
     message: String,
@@ -673,6 +699,8 @@ pub fn app(st: St, lim: Arc<RateLimiter>) -> Router {
         .route("/v1/repos/:r/root/*rev", get(root))
         .route("/v1/repos/:r/trees/:id", get(get_tree))
         .route("/v1/repos/:r/land", post(land))
+        .route("/v1/repos/:r/bisect", get(bisect))
+        .route("/v1/repos/:r/revert", post(revert))
         .route("/v1/repos/:r/log", get(log))
         .route("/v1/repos/:r/blame", get(blame))
         .route("/v1/repos/:r/search", get(search))
