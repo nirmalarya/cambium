@@ -29,6 +29,7 @@ pub const TABLES: &[(&str, &str, &str)] = &[
     ("review_approvals", "review_id,user_name,head,created_at,groups", "review_id,user_name"),
     ("protected_refs", "repo,name,required_approvals", "repo,name"),
     ("blob_meta", "blob,size", "blob"),
+    ("blob_uploads", "blob,principal,created_at", "blob,principal"),
     ("audit_log", "seq,ts,actor,action,repo,target,outcome,detail,request_id,prev_hash,hash", "seq"),
 ];
 const SERIALS: &[(&str, &str)] = &[("wal", "seq"), ("reviews", "id"), ("review_comments", "id"), ("audit_log", "seq")];

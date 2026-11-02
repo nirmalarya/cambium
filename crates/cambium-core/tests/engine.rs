@@ -537,3 +537,29 @@ fn more_than_two_parents_rejected() {
     let r = e.create_changeset("r", vec![root.clone(), root.clone(), root], "u", "octopus", vec![]);
     assert!(r.is_err());
 }
+
+#[test]
+fn fs_blob_store_concurrent_puts_and_integrity() {
+    let d = tempfile::tempdir().unwrap();
+    let s = Arc::new(FsBlobStore::new(d.path()).unwrap());
+    let data = vec![7u8; 1 << 20];
+    let hs: Vec<_> = (0..8)
+        .map(|_| {
+            let (s, data) = (s.clone(), data.clone());
+            std::thread::spawn(move || s.put(&data).unwrap())
+        })
+        .collect();
+    let ids: Vec<String> = hs.into_iter().map(|h| h.join().unwrap()).collect();
+    assert!(ids.windows(2).all(|w| w[0] == w[1]));
+    assert_eq!(s.get(&ids[0]).unwrap().unwrap(), data, "object complete after racing uploads");
+    assert!(s.has(&ids[0]) && !s.has(&"0".repeat(64)));
+    // no temp files left behind
+    let sub = d.path().join(&ids[0][..2]);
+    assert_eq!(std::fs::read_dir(&sub).unwrap().count(), 1);
+    // a corrupted object is refused, moved aside, and healed by the next upload
+    std::fs::write(sub.join(&ids[0]), b"garbage").unwrap();
+    assert!(s.get(&ids[0]).is_err());
+    assert!(!s.has(&ids[0]));
+    s.put(&data).unwrap();
+    assert_eq!(s.get(&ids[0]).unwrap().unwrap(), data);
+}
