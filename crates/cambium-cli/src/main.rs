@@ -94,16 +94,6 @@ impl Client {
             }
         }
     }
-    fn online(&self) -> bool {
-        http().get(&format!("{}/v1/health", self.server)).timeout(std::time::Duration::from_secs(3)).call().is_ok()
-    }
-    fn try_post(&self, path: &str, body: Value) -> Result<Value, Value> {
-        match Self::send(|| self.auth(http().post(&format!("{}{}", self.server, path))).send_json(body.clone())) {
-            Ok(r) => Ok(r.into_json().unwrap_or(Value::Null)),
-            Err(ureq::Error::Status(_, r)) => Err(r.into_json().unwrap_or(Value::Null)),
-            Err(e) => die(format!("cannot reach server: {e}")),
-        }
-    }
     fn auth(&self, r: ureq::Request) -> ureq::Request {
         r.set("Authorization", &format!("Bearer {}", self.token))
     }
@@ -613,8 +603,6 @@ const HELP: &str = "cmb - thin client for a Cambium server
   cmb branch [name]                     list branches, or create one here and switch to it
   cmb switch <branch>                   move the working copy to another branch
   cmb sync                              update to the branch head
-  cmb outbox                            list commits queued while the server was unreachable
-  cmb flush                             land queued commits (server rebases them if main moved)
   cmb merge <rev>                       server merges <rev> into the current branch
   cmb rebase <onto>                     server rebases the current branch onto <onto>
   cmb log [path] [-n N]                 history (first-parent), optionally for a path
@@ -837,40 +825,6 @@ fn run_wc(cmd: &str, mut args: Vec<String>, c: &Client, root: &Path, s: &mut Sta
             if s.stage.is_empty() {
                 die("nothing staged (use `cmb add`)");
             }
-            if !c.online() {
-                // Outbox: keep working while the server is unreachable; `cmb flush` lands it later.
-                let n = std::fs::read_dir(meta(root).join("outbox")).map(|d| d.count()).unwrap_or(0);
-                let dir = meta(root).join(format!("outbox/{n:06}"));
-                std::fs::create_dir_all(dir.join("files")).unwrap();
-                let mut entries = vec![];
-                for (i, p) in s.stage.iter().enumerate() {
-                    let fp = root.join(p);
-                    let present = present(&fp);
-                    if present {
-                        std::fs::write(dir.join(format!("files/{i}")), read_content(&fp).unwrap()).unwrap();
-                    }
-                    entries.push(json!({"path": p, "present": present, "file": i, "mode": file_mode(&fp)}));
-                }
-                std::fs::write(
-                    dir.join("meta.json"),
-                    serde_json::to_vec_pretty(&json!({"message": msg, "base": s.head, "files": entries})).unwrap(),
-                )
-                .unwrap();
-                for p in &s.stage {
-                    let fp = root.join(p);
-                    match hash_file(&fp) {
-                        Some(h) => {
-                            s.files.insert(p.clone(), h);
-                        }
-                        None => {
-                            s.files.remove(p);
-                        }
-                    }
-                }
-                s.stage.clear();
-                println!("server unreachable: queued \"{msg}\" in the outbox (run `cmb flush` when back online)");
-                return;
-            }
             let mut files = vec![];
             for p in &s.stage {
                 let fp = root.join(p);
@@ -914,18 +868,6 @@ fn run_wc(cmd: &str, mut args: Vec<String>, c: &Client, root: &Path, s: &mut Sta
             let b = args.first().cloned().unwrap_or_else(|| die("usage: cmb switch <branch>"));
             materialise(c, root, s, &b);
             s.branch = b;
-        }
-        "flush" => flush(c, root, s),
-        "outbox" => {
-            let mut ds: Vec<_> = std::fs::read_dir(meta(root).join("outbox")).into_iter().flatten().flatten().map(|e| e.path()).collect();
-            ds.sort();
-            if ds.is_empty() {
-                println!("outbox empty");
-            }
-            for d in ds {
-                let m: Value = serde_json::from_slice(&std::fs::read(d.join("meta.json")).unwrap()).unwrap();
-                println!("queued: {}", m["message"].as_str().unwrap());
-            }
         }
         "sync" => {
             let b = s.branch.clone();
@@ -1120,60 +1062,6 @@ fn run_wc(cmd: &str, mut args: Vec<String>, c: &Client, root: &Path, s: &mut Sta
     }
 }
 
-/// Land outbox entries in order. Each is committed on a scratch ref at the head it
-/// was written against, then rebased by the server onto the live branch and the
-/// branch is moved with compare-and-swap.
-fn flush(c: &Client, root: &Path, s: &mut State) {
-    let mut ds: Vec<_> = std::fs::read_dir(meta(root).join("outbox")).into_iter().flatten().flatten().map(|e| e.path()).collect();
-    ds.sort();
-    if ds.is_empty() {
-        println!("outbox empty");
-        return;
-    }
-    let repo = s.repo.clone();
-    for d in ds {
-        let m: Value = serde_json::from_slice(&std::fs::read(d.join("meta.json")).unwrap()).unwrap();
-        let base = m["base"].as_str().unwrap().to_string();
-        let msg = m["message"].as_str().unwrap().to_string();
-        let files: Vec<Value> = m["files"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|f| {
-                let blob = if f["present"].as_bool().unwrap() {
-                    Some(c.put_blob(&std::fs::read(d.join(format!("files/{}", f["file"]))).unwrap()))
-                } else {
-                    None
-                };
-                json!({"path": f["path"], "blob": blob, "mode": f["mode"].as_u64().unwrap_or(MODE_FILE as u64)})
-            })
-            .collect();
-        let scratch = format!("outbox-{}", &base[..12]);
-        c.post(&format!("/v1/repos/{repo}/refs/{scratch}"), json!({"expected": null, "new": base}));
-        c.post_idem(&format!("/v1/repos/{repo}/commit"), json!({"ref": scratch, "expected": base, "message": msg, "files": files}));
-        let res = c.try_post(&format!("/v1/repos/{repo}/rebase"), json!({"branch": scratch, "onto": s.branch}));
-        let tip = match res {
-            Ok(v) => v["cs"].as_str().unwrap().to_string(),
-            Err(e) => die(format!("could not land \"{msg}\": {} (left on ref {scratch})", e["message"].as_str().unwrap_or("error"))),
-        };
-        let cur = c.get(&format!("/v1/repos/{repo}/resolve/{}", s.branch), &[])["cs"].as_str().unwrap().to_string();
-        c.post(&format!("/v1/repos/{repo}/refs/{}", s.branch), json!({"expected": cur, "new": tip}));
-        c.post(&format!("/v1/repos/{repo}/refs/{scratch}"), json!({"expected": tip, "new": null}));
-        std::fs::remove_dir_all(&d).unwrap();
-        println!("landed \"{msg}\" as {}", short(&tip));
-    }
-    // reconcile: everything on disk that matches the server is now tracked at the new head
-    let t = c.post(&format!("/v1/repos/{repo}/tree"), json!({"rev": s.branch, "prefixes": s.sparse}));
-    let entries: BTreeMap<String, String> = serde_json::from_value(t["entries"].clone()).unwrap();
-    let local = changes(root, s);
-    for (p, b) in &entries {
-        if s.files.get(p) != Some(b) && !local.contains_key(p) {
-            write_entry(c, root, p, b);
-        }
-    }
-    s.files = entries;
-    s.head = t["cs"].as_str().unwrap().to_string();
-}
 
 /// One shared HTTP agent. `CAMBIUM_CA=/path/ca.pem` adds an internal CA bundle on top
 /// of the public roots (for servers using a private PKI).

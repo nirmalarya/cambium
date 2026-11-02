@@ -38,4 +38,4 @@ Left out on purpose (not scored)
 - Internal monitoring agents per component: their internal operations
 
 Yours, not in the original (not scored)
-- Offline commit outbox with server-side rebase on flush
+- (Removed) Offline commit outbox: dropped to match the always-online design; it had data-loss bugs.

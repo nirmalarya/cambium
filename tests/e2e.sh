@@ -49,9 +49,9 @@ ok "F02 stale head rejected with hint" '(cd sp && echo z > src/z.rs && cmb add s
 ok "F08 cache bounded" 'CAMBIUM_CACHE_MAX=1 cmb checkout demo tiny >/dev/null 2>&1; [ $(ls $CAMBIUM_CACHE | wc -l) -le 1 ]'
 ok "path traversal rejected by server" '[ "$(curl -s -o /dev/null -w %{http_code} -H "Authorization: Bearer $CAMBIUM_TOKEN" -H content-type:application/json -d "{\"ref\":\"main\",\"expected\":\"x\",\"message\":\"m\",\"files\":[{\"path\":\"../evil\",\"blob\":null}]}" $CAMBIUM_SERVER/v1/repos/demo/commit)" != 200 ]'
 cd $T
-ok "F09 offline commit queued to outbox" '(cd sp && CAMBIUM_SERVER=http://127.0.0.1:1 bash -c "echo off > src/off.rs && $BIN/cmb add src && $BIN/cmb commit -m offline" | grep -q queued && cmb outbox | grep -q offline)'
+ok "F09 commit without a server fails clearly and keeps the change" '(cd sp && echo off > src/off.rs && cmb add src >/dev/null && out=$(CAMBIUM_SERVER=http://127.0.0.1:1 CAMBIUM_MAX_RETRIES=0 $BIN/cmb commit -m offline 2>&1); [ $? -ne 0 ] && echo "$out" | grep -q "cannot reach server" && [ -e src/off.rs ] && cmb status | grep -q off.rs)'
 (cd wc2 && cmb sync >/dev/null 2>&1 && echo online > docs/on.md && cmb add docs >/dev/null && cmb commit -m online >/dev/null)
-ok "F09 flush lands queued commit after main moved" '(cd sp && cmb flush | grep -q landed && cmb log -n 2 | grep -q offline && cmb log -n 2 | grep -q online && cmb status | grep -q clean)'
+ok "F09 the same change commits once the server is back" '(cd sp && cmb sync >/dev/null 2>&1 && cmb commit -m offline >/dev/null && cmb log -n 2 | grep -q offline && cmb log -n 2 | grep -q online && cmb status | grep -q clean)'
 
 # ---------- file modes ----------
 cd $T

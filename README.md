@@ -3,7 +3,7 @@
 Server-centric source control for repositories where most commits come from agents and CI.
 The server creates changesets, merges, rebases, and answers log / blame / diff / merge-base / search.
 The `cmb` client is thin: it lays out a (sparse or virtual) working copy, hashes files for `status`,
-and keeps a bounded object cache.
+and keeps a bounded object cache. Clients are always online: commits go straight to the server.
 
 > **Status: pilot, not production-ready.** See [Known issues](#known-issues) before deploying.
 
@@ -22,7 +22,7 @@ Docker: `docker compose up --build -d`, then `docker compose exec cmbd cmbd toke
 
 ## Commands
 `init, checkout [--sparse], status, add, commit, branch, switch, sync, merge, rebase, log, blame,
-diff, search, sparse, cat, mount [--write], watch, acl, protect, review, whoami, outbox, flush` — see `cmb help`.
+diff, search, sparse, cat, mount [--write], watch, acl, protect, review, whoami` — see `cmb help`.
 
 ## Sign-in and permissions
 - **People:** sign in through your identity provider (OIDC). Set `CAMBIUM_TOKEN_CMD` to a helper that prints a token.
@@ -49,9 +49,8 @@ Scion in turn credits Meta's [Sapling](https://github.com/facebook/sapling) serv
 Earlier centralized systems (CVS, Subversion, Perforce) and Google's Piper are also prior art.
 
 ## Known issues
-Cambium is early alpha. Security and data-integrity hardening is in progress; open items include
-filesystem blob-store write durability, three-way merges of binary files,
-session revocation, and removal of the offline commit outbox (`outbox`/`flush`).
+Cambium is early alpha. Hardening is in progress; open items include session revocation for the
+review UI, permission checks on review comments and approvals, and how OIDC identities are keyed.
 Do not use it for production data yet.
 
 ## License

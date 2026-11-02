@@ -32,7 +32,7 @@ on them — its default consumer-app themes fit poorly, so ranking below is by h
 ## Fix plan (evidence × cheapness)
 | # | fix | status |
 |---|---|---|
-| 1 | Offline outbox: queue commits when the server is unreachable; `cmb flush` lands them via server rebase + CAS | **built**, e2e F09 |
+| 1 | Offline outbox: queue commits when the server is unreachable; `cmb flush` lands them via server rebase + CAS | built, then **removed** (always-online design; data-loss bugs) |
 | 2 | Open source, single container, SQLite default, runs on a laptop | built (Dockerfile + compose) |
 | 3 | Credit prior art plainly in the README (centralized VCS lineage, open-source monorepo servers) | built (README "Prior art") |
 | 4 | Scale down: one process, no fleet; scale-out path documented, not required | built / documented |

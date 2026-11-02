@@ -14,7 +14,6 @@ Binary names: **`cmb`** (client) and **`cmbd`** (server). Written fresh; no comm
 | `cmb log [path] [-n N]`, `cmb blame <path>`, `cmb diff [--from R] [--to R] [path]` | queries | server |
 | `cmb sparse [list|add <prefix>]` | widen the sparse set | client + server tree |
 | `cmb cat <repo> <rev> <path>` | read a file with **no** working copy | server |
-| `cmb outbox`, `cmb flush` | commits queued while offline; land them later via server rebase | client + server |
 
 Output rules (voice: plain, short, specific): one line per fact; ids shortened to 12 hex chars; every error says what to do next (e.g. `hint: … run cmb sync`). Exit code 1 on any failure. No colour needed to read output.
 

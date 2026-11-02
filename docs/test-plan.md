@@ -20,7 +20,7 @@ Run: `cargo test` and `bash tests/e2e.sh` (after `cargo build`).
 | F06-H1 sparse checkout only fetches prefix; widen | F06 | happy | sparse_tree, e2e |
 | F07-H1 read file with no working copy | F07 | happy | e2e |
 | F08-H1 cache cap enforced | F08 | edge | e2e |
-| F09-H1 offline commit queued; flush lands after main moved | F09 | happy | e2e |
+| F09-H1 commit without a server fails clearly, keeps the change; commits once back | F09 | edge | e2e |
 | WAL rows for each changeset and ref move | backend | invariant | wal_records_everything |
 | CAS create/move/delete semantics | backend | invariant | cas_semantics |
 | tokens hashed and verified | backend | invariant | tokens |
