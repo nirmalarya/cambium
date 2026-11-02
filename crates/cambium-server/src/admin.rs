@@ -81,8 +81,9 @@ pub fn dispatch(eng: &Engine, _data: &str, argv: &[String]) -> Option<i32> {
                 }
             }
             Some("rotate") => {
-                let ttl =
-                    ttl_or_exit(&flag(&mut a, "--ttl").unwrap_or_else(|| std::env::var("CAMBIUM_TOKEN_TTL").unwrap_or_else(|_| "90d".into())));
+                let ttl = ttl_or_exit(
+                    &flag(&mut a, "--ttl").unwrap_or_else(|| std::env::var("CAMBIUM_TOKEN_TTL").unwrap_or_else(|_| "90d".into())),
+                );
                 let grace = ttl_or_exit(&flag(&mut a, "--grace").unwrap_or_else(|| "24h".into())).unwrap_or(0);
                 let Some(u) = a.get(3).cloned() else {
                     eprintln!("usage: cmbd token rotate <user> [--ttl 90d] [--grace 24h]");
@@ -101,8 +102,9 @@ pub fn dispatch(eng: &Engine, _data: &str, argv: &[String]) -> Option<i32> {
                 let groups: Vec<String> = flag(&mut a, "--groups")
                     .map(|g| g.split(',').filter(|x| !x.is_empty()).map(String::from).collect())
                     .unwrap_or_default();
-                let ttl =
-                    ttl_or_exit(&flag(&mut a, "--ttl").unwrap_or_else(|| std::env::var("CAMBIUM_TOKEN_TTL").unwrap_or_else(|_| "90d".into())));
+                let ttl = ttl_or_exit(
+                    &flag(&mut a, "--ttl").unwrap_or_else(|| std::env::var("CAMBIUM_TOKEN_TTL").unwrap_or_else(|_| "90d".into())),
+                );
                 let label = flag(&mut a, "--label").unwrap_or_default();
                 let u = a.get(2).cloned().unwrap_or_else(|| "admin".into());
                 match eng.create_token_full(&u, &groups, ttl, &label) {

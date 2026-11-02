@@ -34,4 +34,5 @@ ok "K11 migrations run as a pre-upgrade hook; pods do not auto-migrate" 'py "j=k
 ok "K12 secrets only via existing Secret ref (none in ConfigMap or chart)" 'py "d=k[\"ConfigMap\"][\"data\"]; assert not any(x in d for x in (\"CAMBIUM_DB\",\"CAMBIUM_S3_SECRET_KEY\",\"CAMBIUM_S3_ACCESS_KEY\",\"CAMBIUM_METRICS_TOKEN\")) and \"Secret\" not in k"'
 ok "K13 Service is ClusterIP (not exposed outside the cluster)" 'py "assert k[\"Service\"][\"spec\"][\"type\"]==\"ClusterIP\""'
 ok "K14 ingress (when enabled) requires TLS" '! helm template cambium $C --set ingress.enabled=true && grep -q "tls:" $T/f.yaml'
+ok "K15 migration Job works before chart objects exist and is not a Service endpoint" 'py "jt=k[\"Job\"][\"spec\"][\"template\"]; sel=k[\"Service\"][\"spec\"][\"selector\"]; lab=jt[\"metadata\"][\"labels\"]; assert not all(lab.get(a)==b for a,b in sel.items()); assert \"serviceAccountName\" not in jt[\"spec\"]; assert not any(\"configMapRef\" in e for e in jt[\"spec\"][\"containers\"][0].get(\"envFrom\",[]))"'
 echo "k8s: $pass passed, $fail failed"; rm -rf $T; [ $fail = 0 ]

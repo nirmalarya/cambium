@@ -2,6 +2,9 @@
 # Runs versioned schema migrations once, before new pods roll out. The
 # Deployment runs with CAMBIUM_AUTO_MIGRATE=0, so pods refuse to start against a
 # schema that has not been migrated yet.
+# Hooks run before the chart's own objects exist, so this Job depends only on the
+# pre-existing Secret: settings come straight from values (the new ones on an
+# upgrade), and no chart ServiceAccount is referenced.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -16,18 +19,29 @@ spec:
   activeDeadlineSeconds: 600
   template:
     metadata:
-      labels: {{- include "cambium.selector" . | nindent 8 }}
+      labels:
+        # not the app's selector labels: the Service and PDB must not pick this pod
+        app.kubernetes.io/name: {{ include "cambium.name" . }}-migrate
+        app.kubernetes.io/instance: {{ .Release.Name }}
         app.kubernetes.io/component: migrate
     spec:
       restartPolicy: Never
-      serviceAccountName: {{ include "cambium.fullname" . }}
       automountServiceAccountToken: false
       securityContext: {{- include "cambium.podSecurity" . | nindent 8 }}
       containers:
         - name: migrate
           image: {{ include "cambium.image" . }}
           args: ["migrate"]
-          {{- include "cambium.env" . | nindent 10 }}
+          envFrom:
+            - secretRef: { name: {{ .Values.existingSecret }} }
+          env:
+            - { name: CAMBIUM_DATA, value: /data }
+            {{- range $k, $v := .Values.config }}
+            - { name: {{ $k }}, value: {{ $v | quote }} }
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           securityContext: {{- include "cambium.containerSecurity" . | nindent 12 }}
           resources:
             requests: { cpu: 100m, memory: 128Mi }

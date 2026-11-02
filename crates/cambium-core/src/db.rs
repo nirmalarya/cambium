@@ -264,7 +264,9 @@ pub fn pg_connect(url: &str) -> Result<postgres::Client> {
                 Ok(p) => {
                     let pem = std::fs::read(&p).map_err(|e| Error::Db(format!("CAMBIUM_DB_CA {p}: {e}")))?;
                     for c in <rustls_pki_types::CertificateDer as rustls_pki_types::pem::PemObject>::pem_slice_iter(&pem) {
-                        roots.add(c.map_err(|e| Error::Db(format!("CAMBIUM_DB_CA: {e}")))?).map_err(|e| Error::Db(format!("CAMBIUM_DB_CA: {e}")))?;
+                        roots
+                            .add(c.map_err(|e| Error::Db(format!("CAMBIUM_DB_CA: {e}")))?)
+                            .map_err(|e| Error::Db(format!("CAMBIUM_DB_CA: {e}")))?;
                     }
                 }
                 Err(_) => roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned()),

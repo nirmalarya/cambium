@@ -252,9 +252,7 @@ async fn limit(State((st, l)): State<(St, Arc<RateLimiter>)>, req: Request, next
     };
     let key = match who {
         Some(p) => format!("user:{}", p.user),
-        None => {
-            obs::client_ip(&req).map(cambium_core::limits::ip_key).unwrap_or_else(|| "ip:unknown".into())
-        }
+        None => obs::client_ip(&req).map(cambium_core::limits::ip_key).unwrap_or_else(|| "ip:unknown".into()),
     };
     match l.check(&key) {
         Ok(()) => next.run(req).await,
@@ -790,7 +788,8 @@ mod tests {
         let root = e.create_repo("r", "alice").unwrap();
         let secret = e.put_blob(b"salaries\n").unwrap();
         let open = e.put_blob(b"hello\n").unwrap();
-        let fc = |p: &str, b: &str| cambium_core::FileChange { path: p.into(), blob: Some(b.into()), mode: cambium_core::engine::MODE_FILE };
+        let fc =
+            |p: &str, b: &str| cambium_core::FileChange { path: p.into(), blob: Some(b.into()), mode: cambium_core::engine::MODE_FILE };
         let c = e.commit("r", "main", &root, "alice", "init", vec![fc("pub/a", &open), fc("pay/s", &secret)]).unwrap();
         let a = Principal { user: "alice".into(), groups: vec![] };
         e.set_acl("r", &a, "", "user:alice", Some(Perm::Admin)).unwrap();
@@ -804,7 +803,11 @@ mod tests {
         // commit the hidden blob under a writable path, then try to read it back
         let r = app
             .clone()
-            .oneshot(post("/v1/repos/r/commit", &bob, json!({"ref": "main", "expected": c.id, "message": "m", "files": [{"path": "pub/x", "blob": secret}]})))
+            .oneshot(post(
+                "/v1/repos/r/commit",
+                &bob,
+                json!({"ref": "main", "expected": c.id, "message": "m", "files": [{"path": "pub/x", "blob": secret}]}),
+            ))
             .await
             .unwrap();
         assert_eq!(r.status(), 400);
@@ -815,7 +818,11 @@ mod tests {
         let up = Req::post("/v1/blobs").header("authorization", format!("Bearer {bob}")).body(Body::from("salaries\n")).unwrap();
         assert_eq!(app.clone().oneshot(up).await.unwrap().status(), 200);
         let r = app
-            .oneshot(post("/v1/repos/r/commit", &bob, json!({"ref": "main", "expected": c.id, "message": "m", "files": [{"path": "pub/x", "blob": secret}]})))
+            .oneshot(post(
+                "/v1/repos/r/commit",
+                &bob,
+                json!({"ref": "main", "expected": c.id, "message": "m", "files": [{"path": "pub/x", "blob": secret}]}),
+            ))
             .await
             .unwrap();
         assert_eq!(r.status(), 200);
@@ -878,18 +885,28 @@ mod tests {
         let (app, alice, e, _d) = setup(0.0, 1.0);
         let bob = e.create_token("bob").unwrap();
         let root = e.create_repo("r", "alice").unwrap();
-        let fc = |p: &str, c: &str| cambium_core::FileChange { path: p.into(), blob: Some(e.put_blob(c.as_bytes()).unwrap()), mode: cambium_core::engine::MODE_FILE };
+        let fc = |p: &str, c: &str| cambium_core::FileChange {
+            path: p.into(),
+            blob: Some(e.put_blob(c.as_bytes()).unwrap()),
+            mode: cambium_core::engine::MODE_FILE,
+        };
         let base = e.commit("r", "main", &root, "alice", "base", vec![fc("pub/a", "1\n"), fc("pay/s", "1\n")]).unwrap().id;
         let a = Principal { user: "alice".into(), groups: vec![] };
         e.set_acl("r", &a, "", "user:alice", Some(Perm::Admin)).unwrap();
         e.set_acl("r", &a, "pub", "user:bob", Some(Perm::Write)).unwrap();
         e.cas_ref("r", "feat", None, Some(&base)).unwrap();
         e.commit("r", "feat", &base, "alice", "both", vec![fc("pub/a", "2\n"), fc("pay/s", "2\n")]).unwrap();
-        let body = |r: axum::response::Response| async { serde_json::from_slice::<Value>(&to_bytes(r.into_body(), 1 << 20).await.unwrap()).unwrap() };
-        let rv = body(app.clone().oneshot(post("/v1/repos/r/reviews", &alice, json!({"source": "feat", "title": "t"}))).await.unwrap()).await;
+        let body = |r: axum::response::Response| async {
+            serde_json::from_slice::<Value>(&to_bytes(r.into_body(), 1 << 20).await.unwrap()).unwrap()
+        };
+        let rv =
+            body(app.clone().oneshot(post("/v1/repos/r/reviews", &alice, json!({"source": "feat", "title": "t"}))).await.unwrap()).await;
         let id = rv["id"].as_i64().unwrap();
         let c = |p: &str| json!({"body": "about salaries", "path": p});
-        assert_eq!(app.clone().oneshot(post(&format!("/v1/repos/r/reviews/{id}/comments"), &alice, c("pay/s"))).await.unwrap().status(), 200);
+        assert_eq!(
+            app.clone().oneshot(post(&format!("/v1/repos/r/reviews/{id}/comments"), &alice, c("pay/s"))).await.unwrap().status(),
+            200
+        );
         assert_eq!(app.clone().oneshot(post(&format!("/v1/repos/r/reviews/{id}/comments"), &bob, c("pay/s"))).await.unwrap().status(), 403);
         let shown = body(app.clone().oneshot(get(&format!("/v1/repos/r/reviews/{id}"), &bob, None)).await.unwrap()).await;
         assert_eq!(shown["comments"].as_array().unwrap().len(), 0, "bob must not see comments on pay/");
@@ -950,12 +967,17 @@ mod tests {
         let a = Principal { user: "alice".into(), groups: vec![] };
         e.set_acl("r", &a, "", "user:alice", Some(Perm::Admin)).unwrap();
         e.set_acl("r", &a, "pub", "user:bob", Some(Perm::Write)).unwrap();
-        let fc = |p: &str| cambium_core::FileChange { path: p.into(), blob: Some(e.put_blob(p.as_bytes()).unwrap()), mode: cambium_core::engine::MODE_FILE };
+        let fc = |p: &str| cambium_core::FileChange {
+            path: p.into(),
+            blob: Some(e.put_blob(p.as_bytes()).unwrap()),
+            mode: cambium_core::engine::MODE_FILE,
+        };
         e.cas_ref("r", "pay-work", None, Some(&root)).unwrap();
         let pw = e.commit("r", "pay-work", &root, "alice", "pay", vec![fc("pay/x")]).unwrap().id;
         e.cas_ref("r", "pub-work", None, Some(&root)).unwrap();
         let bw = e.commit("r", "pub-work", &root, "alice", "pub", vec![fc("pub/x")]).unwrap().id;
-        let del = |name: &str, head: &str, tok: &str| post(&format!("/v1/repos/r/refs/{name}"), tok, json!({"expected": head, "new": null}));
+        let del =
+            |name: &str, head: &str, tok: &str| post(&format!("/v1/repos/r/refs/{name}"), tok, json!({"expected": head, "new": null}));
         assert_eq!(app.clone().oneshot(del("pay-work", &pw, &bob)).await.unwrap().status(), 403);
         assert_eq!(app.clone().oneshot(del("pub-work", &bw, &bob)).await.unwrap().status(), 200);
         assert_eq!(app.oneshot(del("pay-work", &pw, &alice)).await.unwrap().status(), 200);

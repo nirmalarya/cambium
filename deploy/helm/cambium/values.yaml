@@ -85,6 +85,9 @@ networkPolicy:
     - namespaceSelector:
         matchLabels: { kubernetes.io/metadata.name: monitoring }
   # Where cmbd may connect: Postgres, object store, IdP JWKS. CIDRs are placeholders.
+  # Postgres, the object store and the identity provider's JWKS endpoint must be
+  # reachable here. If your IdP is outside this range, add its address range, or
+  # set CAMBIUM_OIDC_JWKS_FILE and mount the keys instead.
   egressTo:
     - ipBlock: { cidr: 10.0.0.0/8 }
   egressPorts: [5432, 443]
@@ -92,6 +95,10 @@ networkPolicy:
 serviceMonitor:
   enabled: false
   interval: 30s
+  # send CAMBIUM_METRICS_TOKEN (from existingSecret) when /metrics requires it
+  bearerTokenFromSecret: false
+  # used when podTLS is enabled (scheme becomes https)
+  tlsConfig: { insecureSkipVerify: false }
 
 migrationJob:
   enabled: true

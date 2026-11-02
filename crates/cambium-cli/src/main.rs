@@ -56,7 +56,9 @@ impl Client {
                 }
                 Some(String::from_utf8_lossy(&out.stdout).trim().to_string()).filter(|t| !t.is_empty())
             })
-            .unwrap_or_else(|| die("set CAMBIUM_TOKEN, or CAMBIUM_TOKEN_CMD to a command that prints one (static tokens: `cmbd token <user>`)"));
+            .unwrap_or_else(|| {
+                die("set CAMBIUM_TOKEN, or CAMBIUM_TOKEN_CMD to a command that prints one (static tokens: `cmbd token <user>`)")
+            });
         Client { server: server.trim_end_matches('/').into(), token }
     }
     fn handle(r: Result<ureq::Response, ureq::Error>) -> Value {
@@ -334,7 +336,8 @@ fn find_root() -> PathBuf {
 }
 /// Metadata for a writable mount lives outside the mount, keyed by its path.
 pub(crate) fn mount_meta(dir: &Path) -> PathBuf {
-    PathBuf::from(format!("{}-mounts", user_cache_dir().display())).join(&cambium_core::blob::hash_bytes(dir.to_string_lossy().as_bytes())[..16])
+    PathBuf::from(format!("{}-mounts", user_cache_dir().display()))
+        .join(&cambium_core::blob::hash_bytes(dir.to_string_lossy().as_bytes())[..16])
 }
 /// Working-copy metadata directory: `<root>/.cambium`, or the mount's metadata dir.
 pub(crate) fn meta(root: &Path) -> PathBuf {
@@ -420,7 +423,9 @@ fn wc_path(root: &Path, p: &str) -> Result<PathBuf, String> {
             Ok(m) if m.file_type().is_symlink() => {
                 return Err(format!("refusing to touch {p}: {} is a symlink", cur.strip_prefix(root).unwrap_or(&cur).display()))
             }
-            Ok(m) if !m.is_dir() => return Err(format!("cannot write {p}: {} is a file", cur.strip_prefix(root).unwrap_or(&cur).display())),
+            Ok(m) if !m.is_dir() => {
+                return Err(format!("cannot write {p}: {} is a file", cur.strip_prefix(root).unwrap_or(&cur).display()))
+            }
             _ => {}
         }
     }
@@ -1061,7 +1066,6 @@ fn run_wc(cmd: &str, mut args: Vec<String>, c: &Client, root: &Path, s: &mut Sta
         _ => die(format!("unknown command `{cmd}` (try `cmb help`)")),
     }
 }
-
 
 /// One shared HTTP agent. `CAMBIUM_CA=/path/ca.pem` adds an internal CA bundle on top
 /// of the public roots (for servers using a private PKI).

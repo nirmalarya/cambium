@@ -157,7 +157,8 @@ pub fn app(upstream: String, cache_dir: String) -> Router {
 }
 
 pub fn run() {
-    let upstream = std::env::var("CAMBIUM_UPSTREAM").unwrap_or_else(|_| panic!("cmbd edge needs CAMBIUM_UPSTREAM (the primary's base URL)"));
+    let upstream =
+        std::env::var("CAMBIUM_UPSTREAM").unwrap_or_else(|_| panic!("cmbd edge needs CAMBIUM_UPSTREAM (the primary's base URL)"));
     let data = std::env::var("CAMBIUM_DATA").unwrap_or_else(|_| "./cambium-edge".into());
     let dir = format!("{data}/edge-blobs");
     let addr = std::env::var("CAMBIUM_ADDR").unwrap_or_else(|_| "127.0.0.1:7879".into());

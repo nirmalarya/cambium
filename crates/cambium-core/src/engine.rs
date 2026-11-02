@@ -198,7 +198,10 @@ fn now() -> i64 {
 }
 
 pub fn valid_path(p: &str) -> bool {
-    !p.is_empty() && !p.starts_with('/') && !p.contains('\\') && p.split('/').all(|s| !s.is_empty() && s != "." && s != ".." && s != ".cambium")
+    !p.is_empty()
+        && !p.starts_with('/')
+        && !p.contains('\\')
+        && p.split('/').all(|s| !s.is_empty() && s != "." && s != ".." && s != ".cambium")
 }
 
 /// If `path` is a file in `m` but one of its parent directories is also a file, or other files
@@ -655,7 +658,8 @@ impl Engine {
     pub fn put_blob_as(&self, data: &[u8], who: &Principal) -> Result<String> {
         let id = self.put_blob(data)?;
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
-        self.db.exec("INSERT INTO blob_uploads(blob,principal,created_at) VALUES(?1,?2,?3) ON CONFLICT DO NOTHING", p![&id, &who.user, now])?;
+        self.db
+            .exec("INSERT INTO blob_uploads(blob,principal,created_at) VALUES(?1,?2,?3) ON CONFLICT DO NOTHING", p![&id, &who.user, now])?;
         Ok(id)
     }
     /// May `who` reference blob `id` in a commit or diff? Yes if they can read it

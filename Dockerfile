@@ -7,7 +7,7 @@
 # Build target `tools` adds git for the one-time `cmbd import-git` migration job.
 ARG RUST_IMAGE=rust:1.99.1-slim-bookworm@sha256:24707e70a4f1e23d9a7b25202ec43126d28a52294b96aad5c670df1fd1f1d400
 ARG RUNTIME_IMAGE=gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f
-ARG TOOLS_IMAGE=debian:bookworm-slim
+ARG TOOLS_IMAGE=debian:bookworm-slim@sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde0ac700acee222b6f3
 
 FROM ${RUST_IMAGE} AS build
 WORKDIR /src

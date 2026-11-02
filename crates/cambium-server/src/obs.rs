@@ -99,8 +99,10 @@ impl Metrics {
         // manifest is not yet materialised (work the read path will still have to do).
         if let Ok(Some(r)) = st.db.one("SELECT max(seq), max(created_at) FROM wal", vec![]) {
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
-            o +=
-                &format!("# HELP cambium_wal_head_seq Highest WAL sequence number.\n# TYPE cambium_wal_head_seq gauge\ncambium_wal_head_seq {}\n", r.i(0));
+            o += &format!(
+                "# HELP cambium_wal_head_seq Highest WAL sequence number.\n# TYPE cambium_wal_head_seq gauge\ncambium_wal_head_seq {}\n",
+                r.i(0)
+            );
             o += &format!("# HELP cambium_wal_last_append_age_seconds Seconds since the newest WAL entry.\n# TYPE cambium_wal_last_append_age_seconds gauge\ncambium_wal_last_append_age_seconds {}\n",
                 if r.oi(1).is_some() { now - r.i(1) } else { 0 });
         }
@@ -118,7 +120,10 @@ impl Metrics {
                 "# TYPE cambium_db_pool_reconnects_total counter\ncambium_db_pool_reconnects_total {}\n",
                 p.reconnects.load(Ordering::Relaxed)
             );
-            o += &format!("# TYPE cambium_db_pool_job_panics_total counter\ncambium_db_pool_job_panics_total {}\n", p.panics.load(Ordering::Relaxed));
+            o += &format!(
+                "# TYPE cambium_db_pool_job_panics_total counter\ncambium_db_pool_job_panics_total {}\n",
+                p.panics.load(Ordering::Relaxed)
+            );
         }
         o += &format!("cambium_up 1\ncambium_shutting_down {}\n", self.shutting_down.load(Ordering::Relaxed) as u8);
         o
@@ -191,7 +196,12 @@ pub fn audit(st: &St, e: AuditEvent) {
 pub fn client_ip(req: &axum::extract::Request) -> Option<std::net::IpAddr> {
     let peer = req.extensions().get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|c| c.0.ip());
     if std::env::var("CAMBIUM_TRUST_PROXY").is_ok_and(|v| v == "1") {
-        let fwd = req.headers().get("x-forwarded-for").and_then(|v| v.to_str().ok()).and_then(|v| v.rsplit(',').next()).and_then(|v| v.trim().parse().ok());
+        let fwd = req
+            .headers()
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.rsplit(',').next())
+            .and_then(|v| v.trim().parse().ok());
         return fwd.or(peer);
     }
     peer

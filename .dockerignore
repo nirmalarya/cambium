@@ -1,3 +1,6 @@
 target/
 .git/
 .cargo/
+.env
+.env.*
+!.env.example

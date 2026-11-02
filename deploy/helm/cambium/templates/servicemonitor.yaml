@@ -11,4 +11,14 @@ spec:
     - port: http
       path: /metrics
       interval: {{ .Values.serviceMonitor.interval }}
+      {{- if .Values.podTLS.enabled }}
+      scheme: https
+      tlsConfig: {{- toYaml .Values.serviceMonitor.tlsConfig | nindent 8 }}
+      {{- end }}
+      {{- if .Values.serviceMonitor.bearerTokenFromSecret }}
+      # CAMBIUM_METRICS_TOKEN from the same Secret the pods use
+      authorization:
+        type: Bearer
+        credentials: { name: {{ .Values.existingSecret }}, key: CAMBIUM_METRICS_TOKEN }
+      {{- end }}
 {{- end }}

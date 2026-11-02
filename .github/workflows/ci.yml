@@ -1,6 +1,8 @@
-# Cambium CI. Written for GitHub Actions (self-hosted runners)
-# pool; it has NOT been run on any hosted service from this repository.
-# Nothing here publishes or deploys: the image is built and scanned only.
+# Cambium CI on GitHub-hosted runners. Nothing here publishes or deploys: the
+# image is built and smoke-tested only.
+# Supply chain: actions are pinned by commit SHA, images by digest, tools by
+# version (and checksum where downloaded). Update them deliberately, via PR.
+# Fork PRs run with a read-only token and never on self-hosted runners.
 name: ci
 on:
   pull_request:
@@ -16,26 +18,26 @@ env:
   RUST_TOOLCHAIN: "1.99.1"
 jobs:
   lint:
-    runs-on: [self-hosted, linux]
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: rustup toolchain install $RUST_TOOLCHAIN --profile minimal -c rustfmt,clippy && rustup default $RUST_TOOLCHAIN
       - name: fmt
         run: cargo fmt --all -- --check
       - name: clippy (deny warnings)
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
   test:
-    runs-on: [self-hosted, linux]
+    runs-on: ubuntu-24.04
     services:
       postgres:
-        image: postgres:16-alpine
+        image: postgres:16-alpine@sha256:0cefaabd882e42bcb2a2f3dc56d3ce4770560ba62fd7f197f1a2e008fd5731ab
         env: { POSTGRES_USER: cambium, POSTGRES_PASSWORD: ci-only, POSTGRES_DB: cambium }
         ports: ["5432:5432"]
         options: --health-cmd "pg_isready -U cambium" --health-interval 2s --health-retries 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: rustup toolchain install $RUST_TOOLCHAIN --profile minimal && rustup default $RUST_TOOLCHAIN
-      - run: sudo apt-get update && sudo apt-get install -y fuse3 sqlite3 openssl
+      - run: sudo apt-get update && sudo apt-get install -y fuse3 libfuse3-dev pkg-config sqlite3 openssl
       - name: unit + integration + property tests
         run: cargo test --workspace --locked
       - name: Postgres integration tests
@@ -48,34 +50,41 @@ jobs:
       - name: production checks
         run: bash tests/prod.sh
   audit:
-    runs-on: [self-hosted, linux]
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - run: cargo install --locked cargo-audit cargo-deny
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: cargo install --locked cargo-audit@0.22.2 cargo-deny@0.20.2
       - name: cargo audit (RustSec advisories)
         run: cargo audit --deny warnings
       - name: cargo deny (advisories, licenses, bans, sources)
         run: cargo deny --locked check
   sbom:
-    runs-on: [self-hosted, linux]
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - run: cargo install --locked cargo-cyclonedx
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: cargo install --locked cargo-cyclonedx@0.5.9
       - run: cargo cyclonedx -f json --spec-version 1.5 && mkdir -p sbom && find crates -name '*.cdx.json' -exec mv {} sbom/ \;
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with: { name: sbom, path: sbom/, retention-days: 90 }
   helm:
-    runs-on: [self-hosted, linux]
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
+        with: { version: v3.17.3 }
+      - name: install kubeconform v0.8.0 (checksum verified)
+        run: |
+          curl -sSLo /tmp/kc.tgz https://github.com/yannh/kubeconform/releases/download/v0.8.0/kubeconform-linux-amd64.tar.gz
+          echo "9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883  /tmp/kc.tgz" | sha256sum -c -
+          sudo tar -xzf /tmp/kc.tgz -C /usr/local/bin kubeconform
       - name: lint, render, kubeconform, policy checks
         run: bash tests/k8s-check.sh
   image:
     needs: [lint, test, audit, sbom, helm]
-    runs-on: [self-hosted, linux]
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with: { name: sbom, path: sbom/ }
       - name: build runtime + tools images (no push)
         run: |
@@ -83,5 +92,5 @@ jobs:
           docker build --target tools -t cambium-tools:${{ github.sha }} .
       - name: container smoke test
         run: IMG=cambium:${{ github.sha }} TOOLS_IMG=cambium-tools:${{ github.sha }} bash tests/docker-smoke.sh
-      # Pushing to your registry and signing are environment-specific;
-      # add them in your release pipeline (see docs/rollout-checklist.md).
+      # Pushing to a registry and signing belong in a separate release workflow
+      # (see docs/rollout-checklist.md).

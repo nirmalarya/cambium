@@ -158,7 +158,10 @@ pub fn authenticate(eng: &Engine, oidc: Option<&Oidc>, bearer: &str) -> Result<P
         Some(o) if bearer.split('.').count() == 3 => {
             let p = o.verify(bearer)?;
             if eng.is_static_user(&p.user)? {
-                cambium_core::log::error("OIDC identity collides with a static-token account; refused", serde_json::json!({"user": p.user}));
+                cambium_core::log::error(
+                    "OIDC identity collides with a static-token account; refused",
+                    serde_json::json!({"user": p.user}),
+                );
                 return Err(Error::Unauthorized);
             }
             Ok(p)

@@ -254,7 +254,8 @@ async fn login(State(st): State<St>, Form(f): Form<Login>) -> Response {
         _ => return ui_err("that token was not accepted", StatusCode::UNAUTHORIZED),
     };
     crate::obs::set_actor(&who.user);
-    let ttl = std::env::var("CAMBIUM_SESSION_TTL").ok().and_then(|v| cambium_core::tokens::parse_ttl(&v).ok().flatten()).unwrap_or(8 * 3600);
+    let ttl =
+        std::env::var("CAMBIUM_SESSION_TTL").ok().and_then(|v| cambium_core::tokens::parse_ttl(&v).ok().flatten()).unwrap_or(8 * 3600);
     let sid = match st.create_session(&who, ttl, &t, crate::auth::jwt_exp(&t)) {
         Ok(s) => s,
         Err(e) => return api_to_ui(ApiErr(e)),
@@ -439,7 +440,9 @@ async fn ui_approve(State(st): State<St>, h: HeaderMap, Path((r, id)): Path<(Str
     ui_act(&st, &h, &r, id, &f.csrf, |st, u, az| approve_checked(st, az, &r, id, u).map_err(|e| e.0))
 }
 async fn ui_merge(State(st): State<St>, h: HeaderMap, Path((r, id)): Path<(String, i64)>, Form(f): Form<UiAct>) -> Response {
-    ui_act(&st, &h, &r, id, &f.csrf, |st, u, az| st.merge_review(&r, id, &u.user, &|fs| check_writes(az, fs)).map(|_| ()).map_err(|e| crate::hide_conflicts(e, az)))
+    ui_act(&st, &h, &r, id, &f.csrf, |st, u, az| {
+        st.merge_review(&r, id, &u.user, &|fs| check_writes(az, fs)).map(|_| ()).map_err(|e| crate::hide_conflicts(e, az))
+    })
 }
 fn ui_act(
     st: &St,

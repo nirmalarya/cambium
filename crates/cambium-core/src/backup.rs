@@ -134,7 +134,10 @@ impl Engine {
         }
         let have = self.db.one("SELECT max(version) FROM schema_migrations", vec![])?.map_or(1, |r| r.i(0));
         if m["schema_version"].as_i64().unwrap_or(0) > have {
-            return Err(Error::Bad(format!("backup is schema v{} but this cmbd is v{have}; restore with a newer cmbd", m["schema_version"])));
+            return Err(Error::Bad(format!(
+                "backup is schema v{} but this cmbd is v{have}; restore with a newer cmbd",
+                m["schema_version"]
+            )));
         }
         if self.db.one("SELECT count(*) FROM repos", vec![])?.map_or(0, |r| r.i(0)) > 0
             || self.db.one("SELECT count(*) FROM audit_log", vec![])?.map_or(0, |r| r.i(0)) > 0

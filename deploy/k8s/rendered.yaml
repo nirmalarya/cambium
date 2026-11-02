@@ -230,6 +230,9 @@ spec:
 # Runs versioned schema migrations once, before new pods roll out. The
 # Deployment runs with CAMBIUM_AUTO_MIGRATE=0, so pods refuse to start against a
 # schema that has not been migrated yet.
+# Hooks run before the chart's own objects exist, so this Job depends only on the
+# pre-existing Secret: settings come straight from values (the new ones on an
+# upgrade), and no chart ServiceAccount is referenced.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -250,12 +253,12 @@ spec:
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: cambium
+        # not the app's selector labels: the Service and PDB must not pick this pod
+        app.kubernetes.io/name: cambium-migrate
         app.kubernetes.io/instance: cambium
         app.kubernetes.io/component: migrate
     spec:
       restartPolicy: Never
-      serviceAccountName: cambium
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
@@ -268,8 +271,37 @@ spec:
           image: registry.example.internal/cambium/cmbd:0.1.0
           args: ["migrate"]
           envFrom:
-            - configMapRef: { name: cambium }
             - secretRef: { name: cambium-secrets }
+          env:
+            - { name: CAMBIUM_DATA, value: /data }
+            - { name: CAMBIUM_ADDR, value: "0.0.0.0:7878" }
+            - { name: CAMBIUM_AUTO_MIGRATE, value: "0" }
+            - { name: CAMBIUM_BLOB, value: "s3" }
+            - { name: CAMBIUM_BURST, value: "200" }
+            - { name: CAMBIUM_COOKIE_SECURE, value: "1" }
+            - { name: CAMBIUM_DB_STATEMENT_TIMEOUT_MS, value: "30000" }
+            - { name: CAMBIUM_DB_TLS, value: "require" }
+            - { name: CAMBIUM_HEADER_TIMEOUT_S, value: "15" }
+            - { name: CAMBIUM_HSTS, value: "1" }
+            - { name: CAMBIUM_LOG, value: "info" }
+            - { name: CAMBIUM_MAX_BODY_MB, value: "64" }
+            - { name: CAMBIUM_OIDC_AUDIENCE, value: "" }
+            - { name: CAMBIUM_OIDC_GROUPS_CLAIM, value: "groups" }
+            - { name: CAMBIUM_OIDC_ISSUER, value: "" }
+            - { name: CAMBIUM_OIDC_JWKS_URL, value: "" }
+            - { name: CAMBIUM_OIDC_USER_CLAIM, value: "" }
+            - { name: CAMBIUM_PG_POOL, value: "16" }
+            - { name: CAMBIUM_RATE, value: "50" }
+            - { name: CAMBIUM_REQUEST_TIMEOUT_S, value: "120" }
+            - { name: CAMBIUM_S3_BUCKET, value: "cambium-blobs" }
+            - { name: CAMBIUM_S3_ENDPOINT, value: "https://object-store.example.internal" }
+            - { name: CAMBIUM_S3_PREFIX, value: "" }
+            - { name: CAMBIUM_S3_REGION, value: "us-east-1" }
+            - { name: CAMBIUM_SESSION_TTL, value: "8h" }
+            - { name: CAMBIUM_SHUTDOWN_DRAIN_S, value: "5" }
+            - { name: CAMBIUM_SHUTDOWN_GRACE_S, value: "25" }
+            - { name: CAMBIUM_TOKEN_TTL, value: "90d" }
+            - { name: CAMBIUM_TRUST_PROXY, value: "1" }
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
