@@ -640,6 +640,15 @@ impl Engine {
         self.db.exec("INSERT INTO blob_meta(blob,size) VALUES(?1,?2) ON CONFLICT DO NOTHING", p![&id, data.len() as i64])?;
         Ok(id)
     }
+    /// Blob contents as text if a line merge is safe: valid UTF-8, no NUL byte, at most
+    /// 8 MiB. None means "treat as binary".
+    fn mergeable_text(&self, id: &str) -> Result<Option<String>> {
+        let data = self.blobs.get(id)?.ok_or_else(|| Error::NotFound(format!("blob {id}")))?;
+        if data.len() > 8 << 20 || data.contains(&0) {
+            return Ok(None);
+        }
+        Ok(String::from_utf8(data).ok())
+    }
     /// Store a blob uploaded by `who` and remember that they had its bytes.
     pub fn put_blob_as(&self, data: &[u8], who: &Principal) -> Result<String> {
         let id = self.put_blob(data)?;
@@ -941,13 +950,23 @@ impl Engine {
                     } else if Some(tb) == bb {
                         ob.to_string()
                     } else {
-                        let bt = match bb {
-                            Some(b) => self.read_text(b)?,
-                            None => String::new(),
+                        // line merge only for real text: binary files, symlinks and huge
+                        // files are conflicts, never lossily merged
+                        let texts = if mode == MODE_LINK || om == MODE_LINK || tm == MODE_LINK {
+                            None
+                        } else {
+                            let bt = match bb {
+                                Some(b) => self.mergeable_text(b)?,
+                                None => Some(String::new()),
+                            };
+                            match (bt, self.mergeable_text(ob)?, self.mergeable_text(tb)?) {
+                                (Some(b), Some(o), Some(t)) => Some((b, o, t)),
+                                _ => None,
+                            }
                         };
-                        match text::merge3(&bt, &self.read_text(ob)?, &self.read_text(tb)?) {
-                            Ok(m) => self.blobs.put(m.as_bytes())?,
-                            Err(()) => {
+                        match texts.map(|(b, o, t)| text::merge3(&b, &o, &t)) {
+                            Some(Ok(m)) => self.blobs.put(m.as_bytes())?,
+                            _ => {
                                 conflicts.push(p.clone());
                                 continue;
                             }

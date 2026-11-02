@@ -563,3 +563,43 @@ fn fs_blob_store_concurrent_puts_and_integrity() {
     s.put(&data).unwrap();
     assert_eq!(s.get(&ids[0]).unwrap().unwrap(), data);
 }
+
+#[test]
+fn binary_files_conflict_instead_of_lossy_merge() {
+    let (e, _d) = eng();
+    let root = e.create_repo("r", "u").unwrap();
+    // non-overlapping edits that a line merge would happily combine
+    let bin = |tail: &[u8]| {
+        let mut v = b"\x89PNG\x00\xff\xfe\n".to_vec();
+        v.extend_from_slice(b"a\nb\nc\nd\ne\n");
+        v.extend_from_slice(tail);
+        FileChange { path: "img.png".into(), blob: Some(e.blobs.put(&v).unwrap()), mode: MODE_FILE }
+    };
+    let base = e.commit("r", "main", &root, "u", "base", vec![bin(b"z\n")]).unwrap().id;
+    e.cas_ref("r", "feat", None, Some(&base)).unwrap();
+    let mut first = b"\x89PNG\x00\xff\xfe\n".to_vec();
+    first.extend_from_slice(b"A\nb\nc\nd\ne\nz\n");
+    let fc = FileChange { path: "img.png".into(), blob: Some(e.blobs.put(&first).unwrap()), mode: MODE_FILE };
+    e.commit("r", "feat", &base, "u", "edit head", vec![fc]).unwrap();
+    e.commit("r", "main", &base, "u", "edit tail", vec![bin(b"Z\n")]).unwrap();
+    assert!(matches!(e.merge("r", "main", "feat", "u"), Err(Error::Conflict(p)) if p == vec!["img.png".to_string()]));
+    // non-UTF-8 "text" too
+    let h = e.get_ref("r", "main").unwrap().unwrap();
+    let lat = |s: &[u8]| FileChange { path: "l1.txt".into(), blob: Some(e.blobs.put(s).unwrap()), mode: MODE_FILE };
+    let b2 = e.commit("r", "main", &h, "u", "latin1", vec![lat(b"caf\xe9\n1\n2\n3\n")]).unwrap().id;
+    e.cas_ref("r", "x", None, Some(&b2)).unwrap();
+    e.commit("r", "x", &b2, "u", "x", vec![lat(b"caf\xe9\n1\n2\nTHREE\n")]).unwrap();
+    e.commit("r", "main", &b2, "u", "y", vec![lat(b"CAF\xe9\n1\n2\n3\n")]).unwrap();
+    assert!(matches!(e.merge("r", "main", "x", "u"), Err(Error::Conflict(_))));
+}
+#[test]
+fn symlink_targets_conflict_instead_of_merging() {
+    let (e, _d) = eng();
+    let root = e.create_repo("r", "u").unwrap();
+    let link = |t: &str| FileChange { mode: MODE_LINK, ..put(&e, "l", t) };
+    let base = e.commit("r", "main", &root, "u", "base", vec![link("a\nb\nc\n")]).unwrap().id;
+    e.cas_ref("r", "feat", None, Some(&base)).unwrap();
+    e.commit("r", "feat", &base, "u", "f", vec![link("A\nb\nc\n")]).unwrap();
+    e.commit("r", "main", &base, "u", "m", vec![link("a\nb\nC\n")]).unwrap();
+    assert!(matches!(e.merge("r", "main", "feat", "u"), Err(Error::Conflict(_))));
+}
