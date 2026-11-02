@@ -10,6 +10,8 @@ fn nodes() -> Option<(Arc<Engine>, Arc<Engine>, String, tempfile::TempDir)> {
         eprintln!("CAMBIUM_TEST_PG unset: Postgres tests skipped");
         return None;
     };
+    // many test engines share one server: keep each pool small (max_connections is 100)
+    std::env::set_var("CAMBIUM_PG_POOL", "2");
     let d = tempfile::tempdir().unwrap();
     let blobs: Arc<dyn BlobStore> = Arc::new(FsBlobStore::new(d.path()).unwrap());
     let a = Arc::new(Engine::open_pg(&url, blobs.clone()).unwrap());

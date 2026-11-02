@@ -65,6 +65,7 @@ cmbd ──(outbound, internal only)──▶ identity provider JWKS endpoint (s
 | setting | effect |
 |---|---|
 | `CAMBIUM_DB=postgres://user:pass@host/db` | Metadata in Postgres; any number of cmbd nodes share it. Ref moves are a single-row compare-and-swap, so concurrent writers never both win. `CAMBIUM_PG_POOL` (default 4) connections per node. Unset = SQLite in `CAMBIUM_DATA`. |
+| `CAMBIUM_PG_POOL=16` | PostgreSQL connections per cmbd node (default 16). Keep replicas × pool (+ the migration job and any admin commands) below the server's `max_connections` (100 by default). |
 | `CAMBIUM_BLOB=s3` + `CAMBIUM_S3_ENDPOINT`, `CAMBIUM_S3_BUCKET`, `CAMBIUM_S3_REGION`, `CAMBIUM_S3_ACCESS_KEY`, `CAMBIUM_S3_SECRET_KEY`, `CAMBIUM_S3_PREFIX` | Blobs in an S3-compatible object store (path-style, SigV4). The reference setup is **RustFS** (see `docker-compose.yml`); CI runs the blob store and engine against a real RustFS (`tests/s3_live.rs`). cmbd creates the bucket at startup if missing. Credentials come from the secret store, never the repo. |
 | `CAMBIUM_BLOB_DIR=/mnt/shared/blobs` | Blobs in a shared directory (e.g. an NFS mount) for multi-node without an object store. |
 | `cmbd edge` + `CAMBIUM_UPSTREAM=https://<primary>` | Regional cache tier. Same API; serves blobs and complete trees (both verified against their ids) from local copies, forwards everything mutable. |
