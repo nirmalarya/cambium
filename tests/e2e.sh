@@ -47,7 +47,7 @@ ok "F06 sparse checkout fetches only prefix" 'cmb checkout demo sp --sparse src 
 ok "F06 sparse list" '(cd sp && cmb sparse | grep -q src)'
 ok "F06 sparse widen" '(cd sp && cmb sparse add docs && [ -e docs/readme.md ])'
 ok "F07 API-only read (no working copy)" 'cmb cat demo main src/lib.rs | grep -q inserted'
-# Scion-style fetch: root tree -> changed trees -> blobs; unchanged directories are skipped
+# tree fetch: root tree -> changed trees -> blobs; unchanged directories are skipped
 (cd $T && cmb init trees tr >/dev/null 2>&1 && cd tr && mkdir -p a b c && echo 1 > a/x && echo 2 > b/y && echo 3 > c/z && cmb add a b c >/dev/null && cmb commit -m dirs >/dev/null)
 (cd $T && cmb checkout trees tr2 >/dev/null 2>&1)
 (cd $T/tr && echo changed > a/x && cmb add a >/dev/null && cmb commit -m "only a" >/dev/null)

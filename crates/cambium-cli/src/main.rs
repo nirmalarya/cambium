@@ -588,7 +588,7 @@ fn changes(root: &Path, s: &State) -> BTreeMap<String, Option<String>> {
 
 static TREES_FETCHED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 static TREES_REUSED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-/// Scion-style fetch: start at the root tree of `target` and walk down, skipping every
+/// Tree fetch: start at the root tree of `target` and walk down, skipping every
 /// directory whose tree id is unchanged since the last layout (its files are reused),
 /// and only entering directories inside the sparse set. Returns (changeset, files,
 /// complete trees seen).

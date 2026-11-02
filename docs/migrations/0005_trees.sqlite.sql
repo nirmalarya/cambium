@@ -1,4 +1,4 @@
--- Content-addressed directory trees (Scion-style fetch): one immutable object per
+-- Content-addressed directory trees (tree fetch protocol): one immutable object per
 -- directory, shared by every changeset where that directory is unchanged.
 CREATE TABLE IF NOT EXISTS trees (id TEXT PRIMARY KEY, body TEXT NOT NULL);
 -- Where each tree occurs, so a tree is only served at a path the caller may see.

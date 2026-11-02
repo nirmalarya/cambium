@@ -1,5 +1,5 @@
-//! Server-side building blocks for automated pipelines (Scion runs bisect and revert
-//! as services on top of its history APIs): revert a changeset on top of the current
+//! Server-side building blocks for automated pipelines built on the
+//! history APIs: revert a changeset on top of the current
 //! head, and stateless bisection along first-parent history using skip lists.
 use crate::derived::Skip;
 use crate::engine::{Engine, Error, FileChange, Result};

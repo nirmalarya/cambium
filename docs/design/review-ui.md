@@ -1,6 +1,6 @@
 # Review UI concept ("Cambium Review") — concept only, not built
 
-The original ships a companion review web app (Go + React per secondary coverage). This slice documents a minimal concept; parity rows for it are `no`.
+This slice documents a minimal concept; parity rows for it are `no`.
 
 Screens
 - R1 Change list: table (title, author/agent, base, status, risk badge), filters "needs me", "agent-only", "touches protected paths". Empty: "Nothing waiting on you."

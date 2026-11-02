@@ -1,4 +1,4 @@
-//! Semantic classification of changes for review rules (Scion's review tool can
+//! Semantic classification of changes for review rules (reviews can
 //! separate comment-only edits from logic changes). Conservative by design: anything
 //! not positively recognised as documentation or a comment/formatting-only edit in a
 //! supported language is `Logic`, so a misclassification can only ever ask for *more*

@@ -1,4 +1,4 @@
-//! Cache tiers, as in Scion: `cmbd daemon` (one per machine) -> `cmbd edge` (one per
+//! Cache tiers: `cmbd daemon` (one per machine) -> `cmbd edge` (one per
 //! region) -> `cmbd` (authoritative). Every tier speaks the same API and talks only
 //! to its one upstream (CAMBIUM_UPSTREAM), so tiers stack and failures stay isolated.
 //! Immutable objects are served locally after the first fetch: blobs (checked

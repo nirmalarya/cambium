@@ -1,11 +1,8 @@
-# Aligning Cambium with Scion's published design
+# Cambium design and roadmap
 
-Source: Anthropic, "Redesigning source control"
-(https://www.anthropic.com/research/redesigning-source-control). Scion's code is not
-public; this document maps each published design point to Cambium. Where the article
-is silent, the choice made here is marked **(our choice)**.
+How Cambium is built, design point by design point, and the order the work was done in.
 
-## Principles (from the article)
+## Principles
 1. Clients are always online.
 2. The server does the heavy lifting.
 3. Everything scales horizontally.
@@ -14,7 +11,7 @@ is silent, the choice made here is marked **(our choice)**.
 
 ## Mapping
 
-| Scion (published) | Cambium today | Plan |
+| Design point | Before | Now |
 |---|---|---|
 | Changeset = WAL entry listing files changed vs first parent, content-addressed compressed blobs | Same | Keep |
 | Creating and fetching changesets never touch refs | Commits go through a branch ref | Changesets are created without a ref; landing on `main` is a separate server-side rebase + CAS |
@@ -24,9 +21,9 @@ is silent, the choice made here is marked **(our choice)**.
 | Server-side blame, log, merge-base APIs used by CI, bisect and revert pipelines | Blame, log, diff, merge-base | Keep; add bisect and revert endpoints **(our choice: as APIs)** |
 | Sparse and virtualized checkouts; API-only writes | Sparse checkout, FUSE mount (Linux), API commits | Keep; mount reads trees lazily |
 | Cache tiers: per-node daemon → regional cache → authoritative server, same RPCs, strict tiering | Shared cache directory, `cmbd edge` | `cmbd daemon` (per node) → `cmbd edge` (regional) → `cmbd` (authoritative), same API, each tier talks only to the next |
-| Storage: Spanner + cloud object storage | SQLite or Postgres; filesystem or S3 | **PostgreSQL + RustFS** (S3-compatible) as the reference deployment; SQLite + filesystem for single node |
+| Storage: a strongly consistent metadata store + object storage | SQLite or Postgres; filesystem or S3 | **PostgreSQL + RustFS** (S3-compatible) as the reference deployment; SQLite + filesystem for single node |
 | Per-directory permissions | Same | Keep |
-| Review (Antique): semantic approval rules, e.g. comment-only edits separated from logic | N approvals + path owners | Reviews point at a changeset, not a branch; add rules by change kind |
+| Review: semantic approval rules, e.g. comment-only edits separated from logic | N approvals + path owners | Reviews point at a changeset, not a branch; add rules by change kind |
 | No global merge queue; post-merge and pre-deploy testing | No queue | Keep; landing is lock-free rebase + CAS with retry |
 | Git ingestion / migration | One-shot import | Import `main` and release branches; incremental re-import |
 | Hermetic simulations, fuzzing, rate limiting | Property tests, rate limiting | Add a deterministic simulation harness and fuzz targets |

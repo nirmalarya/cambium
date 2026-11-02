@@ -1,6 +1,6 @@
 # Cambium — architecture
 
-Reads recon.md / features.csv. Template adapted: no web app, payments or email; this is a CLI + API server.
+A CLI + API server; see design/roadmap.md for the design points.
 
 ## 1. Stack
 | layer | choice | why |
@@ -12,7 +12,7 @@ Reads recon.md / features.csv. Template adapted: no web app, payments or email; 
 | auth | opaque bearer tokens, sha256-hashed at rest, minted by `cmbd token <user>` | simplest thing that is safe for agents and CI |
 | deploy | one container (Dockerfile + compose), volume at /data | no hosting account needed |
 
-One database, one server process. The original's fleet tiers (node daemon, regional caches) are not needed for parity of *features*; content addressing keeps the door open.
+Deployment: one database (SQLite single node, or PostgreSQL shared by many stateless cmbd nodes), an object store, and optional cache tiers (`cmbd daemon` per machine, `cmbd edge` per region).
 
 ## 2. Schema
 See `schema.sql` (also embedded in the server via `include_str!`). Tables: `tokens`, `repos`, `wal`, `changesets`, `changeset_files`, `refs`, `derived`.

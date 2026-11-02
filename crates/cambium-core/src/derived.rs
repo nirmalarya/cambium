@@ -1,4 +1,4 @@
-//! Derived data, as in Scion: one generic mechanism for everything computed from the
+//! Derived data: one generic mechanism for everything computed from the
 //! commit graph. A derived type says how to compute its value for a changeset from the
 //! changeset itself and the values already derived for its parents; the engine stores
 //! each value once (keyed by type name and version, so a new version recomputes

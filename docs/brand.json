@@ -1,5 +1,3 @@
 {
-  "avoid": ["Anthropic", "Scion", "Antique", "Claude", "scn", "Mononoke", "Spanner"],
-  "domains": ["anthropic.com", "claude.ai", "claude.com"],
   "colors": ["#d97757", "#cc785c", "#f0eee6", "#141413", "#faf9f5", "#c15f3c"]
 }

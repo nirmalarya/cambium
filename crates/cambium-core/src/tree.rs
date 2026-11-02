@@ -1,4 +1,4 @@
-//! Content-addressed directory trees, as in Scion's fetch protocol: every directory is
+//! Content-addressed directory trees, the unit of the fetch protocol: every directory is
 //! an immutable object (sorted entries of name, kind, id, size) identified by the hash
 //! of its canonical form. A changeset's root tree is derived from its first parent's
 //! root plus its changes, so only directories on a changed path get new objects and

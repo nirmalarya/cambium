@@ -24,7 +24,7 @@ Docker: `docker compose up --build -d`, then `docker compose exec cmbd cmbd toke
 `init, checkout [--sparse], status, add, commit [--draft], land, sync, branch, switch, merge, log,
 blame, diff, search, sparse, cat, mount [--write], watch, acl, protect, review, revert, bisect, whoami` — see `cmb help`.
 
-## Workflow (Scion's model: no feature branches)
+## Workflow (no feature branches)
 - **Refs:** only `main` and `release/<name>`. Every ref move is a compare-and-swap on one row.
 - **Commit:** `cmb commit -m msg` creates a changeset and lands it on `main`. If someone else landed
   first, the server rebases yours onto the new head (lock-free, no merge queue).
@@ -47,17 +47,13 @@ blame, diff, search, sparse, cat, mount [--write], watch, acl, protect, review, 
 - **Metadata:** SQLite (WAL mode) for a single node, Postgres for multiple nodes. Schemas in `docs/schema.sql` and `docs/schema-pg.sql`.
 - **Deployment:** Docker image, Helm chart in `deploy/helm/cambium`.
 
-See `docs/design/scion-alignment.md` for how each part maps to Scion's published design.
+See `docs/design/roadmap.md` for the design points and how they were built.
 
 ## Prior art and attribution
-The design follows the ideas Anthropic published about **Scion**, its in-house source control system
-([Redesigning source control](https://www.anthropic.com/research/redesigning-source-control)):
-always-online clients, server-side history and merges, changesets as write-ahead-log entries,
-compare-and-swap refs, derived data computed from parents, and optional working copies.
-Scion itself is not open source; Cambium is an independent implementation from the published
-description and is not affiliated with or endorsed by Anthropic.
-Scion in turn credits Meta's [Sapling](https://github.com/facebook/sapling) server (Mononoke) and its Bonsai data model.
-Earlier centralized systems (CVS, Subversion, Perforce) and Google's Piper are also prior art.
+Cambium is an independent implementation inspired by the design Anthropic described in
+[Redesigning source control](https://www.anthropic.com/research/redesigning-source-control); it
+is not affiliated with or endorsed by Anthropic. Earlier prior art includes Meta's
+[Sapling](https://github.com/facebook/sapling) server, Google's Piper, and CVS, Subversion and Perforce.
 
 ## Known issues
 Cambium is early alpha: the security and data-integrity fixes from the first review have landed,

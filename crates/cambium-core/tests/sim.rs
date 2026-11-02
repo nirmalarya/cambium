@@ -1,4 +1,4 @@
-//! Deterministic simulation (Scion's team relied on hermetic simulations): a seeded
+//! Deterministic simulation: a seeded
 //! workload of actors racing to land work on one engine, with restarts, checked after
 //! every step against a simple reference model.
 //!

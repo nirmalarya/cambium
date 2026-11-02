@@ -205,7 +205,7 @@ fn now() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64
 }
 
-/// Ref names allowed through the API: `main` and `release/<name>` (Scion's model:
+/// Ref names allowed through the API: `main` and `release/<name>` (the branch model:
 /// no feature branches; work moves as changesets and reviews).
 pub fn valid_ref_name(name: &str) -> bool {
     name == "main"

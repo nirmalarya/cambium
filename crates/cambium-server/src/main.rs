@@ -349,7 +349,7 @@ async fn rebase(State(st): State<St>, h: HeaderMap, Path(r): Path<String>, Json(
     let (cs, onto) = (st.resolve(&r, &b.cs)?, st.resolve(&r, &b.onto)?);
     Ok(Json(json!({"cs": st.rebase_onto(&r, &cs, &onto, &|f| check_writes(&az, f)).map_err(|e| hide_conflicts(e, &az))?})))
 }
-/// Scion-style fetch, step 1: the changeset a revision names and its root tree.
+/// Tree fetch, step 1: the changeset a revision names and its root tree.
 async fn root(State(st): State<St>, h: HeaderMap, Path((r, rev)): Path<(String, String)>) -> R {
     let u = user(&st, &h)?;
     need(st.authz(&r, &u)?.can_any(Perm::Read), "read on this repo")?;
@@ -361,7 +361,7 @@ struct TreeQ {
     #[serde(default)]
     path: String,
 }
-/// Scion-style fetch, step 2: one directory. Served only where it occurs (`path`) and
+/// Tree fetch, step 2: one directory. Served only where it occurs (`path`) and
 /// if the caller may see that directory; entries the caller cannot read are left out
 /// (then `complete` is false and the content no longer hashes to `id`). Immutable, so
 /// any cache may keep it.

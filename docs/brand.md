@@ -1,10 +1,10 @@
 # Brand: Cambium
 
-**Name: Cambium**. Open source (MIT). In a tree, the cambium is the growth layer; in grafting, it is where a scion fuses with its rootstock.
+**Name: Cambium**. Open source (MIT). In a tree, the cambium is the growth layer; in grafting, it is where the graft fuses with its rootstock.
 The earlier misspelling is on the sweep avoid list (brand.json).
 Binaries: `cmb` (client) and `cmbd` (server). Static token prefix: `cmbt_`. Cache directory: `~/.cache/cambium`.
 
-## Palette (forest green; the original's warm clay family is listed in brand.json `colors` to keep it out)
+## Palette (forest green)
 | role | hex |
 |---|---|
 | accent | `#1d5c45` |
