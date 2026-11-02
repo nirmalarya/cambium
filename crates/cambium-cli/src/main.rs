@@ -26,6 +26,13 @@ struct State {
     files: BTreeMap<String, String>,
 }
 
+/// Plain http to anything but this machine.
+fn insecure_remote(server: &str) -> bool {
+    let Some(rest) = server.strip_prefix("http://") else { return false };
+    let host = rest.split('/').next().unwrap_or("");
+    let host = host.rsplit_once(':').map_or(host, |(h, p)| if p.chars().all(|c| c.is_ascii_digit()) { h } else { host });
+    !matches!(host, "127.0.0.1" | "localhost" | "[::1]") && !host.starts_with("127.")
+}
 struct Client {
     server: String,
     token: String,
@@ -59,6 +66,9 @@ impl Client {
             .unwrap_or_else(|| {
                 die("set CAMBIUM_TOKEN, or CAMBIUM_TOKEN_CMD to a command that prints one (static tokens: `cmbd token <user>`)")
             });
+        if insecure_remote(&server) && std::env::var("CAMBIUM_ALLOW_HTTP").map_or(true, |v| v != "1") {
+            eprintln!("cmb: warning: {server} is plain http; your token is sent unencrypted (use https, or set CAMBIUM_ALLOW_HTTP=1)");
+        }
         Client { server: server.trim_end_matches('/').into(), token }
     }
     fn handle(r: Result<ureq::Response, ureq::Error>) -> Value {
@@ -764,7 +774,7 @@ fn main() {
             #[cfg(not(target_os = "linux"))]
             {
                 let _ = (entries, sizes, write);
-                die("cmb mount needs Linux FUSE; use `cmb checkout --lazy` instead");
+                die("cmb mount needs Linux FUSE; use `cmb checkout --sparse <dirs>` to fetch only what you need");
             }
         }
         "whoami" => {
@@ -1138,6 +1148,15 @@ mod tests {
             let _ = std::fs::remove_dir_all(outside);
         }
         let _ = std::fs::remove_dir_all(root);
+    }
+    #[test]
+    fn warns_only_for_remote_plain_http() {
+        assert!(insecure_remote("http://cambium.example.test"));
+        assert!(insecure_remote("http://10.0.0.5:7878/"));
+        assert!(!insecure_remote("https://cambium.example.test"));
+        assert!(!insecure_remote("http://127.0.0.1:7878"));
+        assert!(!insecure_remote("http://localhost:7878"));
+        assert!(!insecure_remote("http://[::1]:7878"));
     }
     #[cfg(unix)]
     #[test]
