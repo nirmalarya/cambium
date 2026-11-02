@@ -6,6 +6,13 @@ pub fn hash_bytes(data: &[u8]) -> String {
     hex::encode(Sha256::digest(data))
 }
 
+/// Constant-time comparison of two secrets (compares their hashes, so the time does
+/// not depend on where they differ or on their lengths).
+pub fn ct_eq(a: &str, b: &str) -> bool {
+    let (x, y) = (Sha256::digest(a.as_bytes()), Sha256::digest(b.as_bytes()));
+    x.iter().zip(y.iter()).fold(0u8, |acc, (p, q)| acc | (p ^ q)) == 0
+}
+
 pub trait BlobStore: Send + Sync {
     fn put(&self, data: &[u8]) -> std::io::Result<String>;
     fn get(&self, id: &str) -> std::io::Result<Option<Vec<u8>>>;

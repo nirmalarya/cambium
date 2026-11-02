@@ -59,7 +59,14 @@ impl IntoResponse for ApiErr {
             Error::Forbidden(_) => (StatusCode::FORBIDDEN, "forbidden"),
             _ => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         };
-        let mut body = json!({"error": kind, "message": self.0.to_string()});
+        // storage and I/O details stay in the server log, not in the response
+        let message = if code == StatusCode::INTERNAL_SERVER_ERROR {
+            cambium_core::log::error("internal error", json!({"error": self.0.to_string()}));
+            "internal error; see the server log".to_string()
+        } else {
+            self.0.to_string()
+        };
+        let mut body = json!({"error": kind, "message": message});
         if let Error::Conflict(p) = &self.0 {
             body["paths"] = json!(p);
         }
@@ -70,6 +77,21 @@ impl IntoResponse for ApiErr {
     }
 }
 pub(crate) type R = Result<Json<Value>, ApiErr>;
+/// Conflict paths the caller cannot read are replaced by a count, so a failed merge
+/// still explains itself without naming hidden files.
+pub(crate) fn hide_conflicts(e: Error, az: &cambium_core::Authz) -> Error {
+    match e {
+        Error::Conflict(paths) => {
+            let n = paths.len();
+            let mut shown: Vec<String> = paths.into_iter().filter(|p| az.can(p, Perm::Read)).collect();
+            if shown.len() < n {
+                shown.push(format!("({} more you cannot read)", n - shown.len()));
+            }
+            Error::Conflict(shown)
+        }
+        e => e,
+    }
+}
 
 pub(crate) fn user(st: &St, h: &HeaderMap) -> Result<Principal, ApiErr> {
     let t =
@@ -297,7 +319,7 @@ async fn merge(State(st): State<St>, h: HeaderMap, Path(r): Path<String>, Json(b
     let u = user(&st, &h)?;
     let az = st.authz(&r, &u)?;
     guard_protected(&st, &r, &b.target)?;
-    Ok(Json(json!(st.merge_checked(&r, &b.target, &b.source, &u.user, &|f| check_writes(&az, f))?)))
+    Ok(Json(json!(st.merge_checked(&r, &b.target, &b.source, &u.user, &|f| check_writes(&az, f)).map_err(|e| hide_conflicts(e, &az))?)))
 }
 #[derive(Deserialize)]
 struct Rebase {
@@ -308,7 +330,7 @@ async fn rebase(State(st): State<St>, h: HeaderMap, Path(r): Path<String>, Json(
     let u = user(&st, &h)?;
     let az = st.authz(&r, &u)?;
     guard_protected(&st, &r, &b.branch)?;
-    Ok(Json(json!({"cs": st.rebase_checked(&r, &b.branch, &b.onto, &|f| check_writes(&az, f))?})))
+    Ok(Json(json!({"cs": st.rebase_checked(&r, &b.branch, &b.onto, &|f| check_writes(&az, f)).map_err(|e| hide_conflicts(e, &az))?})))
 }
 #[derive(Deserialize)]
 struct LogQ {
@@ -321,7 +343,7 @@ async fn log(State(st): State<St>, h: HeaderMap, Path(r): Path<String>, Query(q)
     let az = st.authz(&r, &u)?;
     need(az.can_any(Perm::Read), "read on this repo")?;
     let cs = st.resolve(&r, &q.rev)?;
-    let limit = q.limit.unwrap_or(50);
+    let limit = q.limit.unwrap_or(50).clamp(1, 1000);
     // over-fetch when redacting so the caller still gets up to `limit` entries
     let raw = st.log(&r, &cs, q.path.as_deref(), if az.open() { limit } else { limit.saturating_mul(10).max(limit) })?;
     let v: Vec<_> = raw.into_iter().filter_map(|c| redact(&az, c)).take(limit).collect();
@@ -836,6 +858,42 @@ mod tests {
         let t2 = e.create_token("alice").unwrap();
         assert_eq!(app.clone().oneshot(get("/v1/repos/r/refs", &t2, None)).await.unwrap().status(), 200);
         assert_eq!(app.oneshot(get("/v1/repos/r/refs", &t2, None)).await.unwrap().status(), 429);
+    }
+
+    /// Review comments, approvals and merge conflicts respect per-directory permissions.
+    #[tokio::test]
+    async fn reviews_and_conflicts_hide_unreadable_paths() {
+        let (app, alice, e, _d) = setup(0.0, 1.0);
+        let bob = e.create_token("bob").unwrap();
+        let root = e.create_repo("r", "alice").unwrap();
+        let fc = |p: &str, c: &str| cambium_core::FileChange { path: p.into(), blob: Some(e.put_blob(c.as_bytes()).unwrap()), mode: cambium_core::engine::MODE_FILE };
+        let base = e.commit("r", "main", &root, "alice", "base", vec![fc("pub/a", "1\n"), fc("pay/s", "1\n")]).unwrap().id;
+        let a = Principal { user: "alice".into(), groups: vec![] };
+        e.set_acl("r", &a, "", "user:alice", Some(Perm::Admin)).unwrap();
+        e.set_acl("r", &a, "pub", "user:bob", Some(Perm::Write)).unwrap();
+        e.cas_ref("r", "feat", None, Some(&base)).unwrap();
+        e.commit("r", "feat", &base, "alice", "both", vec![fc("pub/a", "2\n"), fc("pay/s", "2\n")]).unwrap();
+        let body = |r: axum::response::Response| async { serde_json::from_slice::<Value>(&to_bytes(r.into_body(), 1 << 20).await.unwrap()).unwrap() };
+        let rv = body(app.clone().oneshot(post("/v1/repos/r/reviews", &alice, json!({"source": "feat", "title": "t"}))).await.unwrap()).await;
+        let id = rv["id"].as_i64().unwrap();
+        let c = |p: &str| json!({"body": "about salaries", "path": p});
+        assert_eq!(app.clone().oneshot(post(&format!("/v1/repos/r/reviews/{id}/comments"), &alice, c("pay/s"))).await.unwrap().status(), 200);
+        assert_eq!(app.clone().oneshot(post(&format!("/v1/repos/r/reviews/{id}/comments"), &bob, c("pay/s"))).await.unwrap().status(), 403);
+        let shown = body(app.clone().oneshot(get(&format!("/v1/repos/r/reviews/{id}"), &bob, None)).await.unwrap()).await;
+        assert_eq!(shown["comments"].as_array().unwrap().len(), 0, "bob must not see comments on pay/");
+        // bob cannot approve a change he cannot fully see
+        assert_eq!(app.clone().oneshot(post(&format!("/v1/repos/r/reviews/{id}/approve"), &bob, json!({}))).await.unwrap().status(), 403);
+        // conflicts: both sides edit pub/a and pay/s
+        e.commit("r", "main", &base, "alice", "main side", vec![fc("pub/a", "3\n"), fc("pay/s", "3\n")]).unwrap();
+        let r = app.clone().oneshot(post("/v1/repos/r/merge", &bob, json!({"target": "main", "source": "feat"}))).await.unwrap();
+        assert_eq!(r.status(), 409);
+        let v = body(r).await;
+        let paths: Vec<String> = serde_json::from_value(v["paths"].clone()).unwrap();
+        assert_eq!(paths, vec!["pub/a".to_string(), "(1 more you cannot read)".to_string()]);
+        assert!(!v.to_string().contains("pay/"));
+        // log limit is capped
+        let r = app.oneshot(get("/v1/repos/r/log?rev=main&limit=1000000000", &alice, None)).await.unwrap();
+        assert_eq!(r.status(), 200);
     }
 
     // ---------- OIDC + per-directory permissions over HTTP ----------

@@ -311,7 +311,7 @@ pub async fn readyz(State(st): State<St>) -> Response {
 pub async fn metrics_endpoint(State(st): State<St>, h: axum::http::HeaderMap) -> Response {
     if let Ok(want) = std::env::var("CAMBIUM_METRICS_TOKEN") {
         let got = h.get("authorization").and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer "));
-        if got != Some(want.as_str()) {
+        if !got.is_some_and(|g| cambium_core::blob::ct_eq(g, &want)) {
             return StatusCode::UNAUTHORIZED.into_response();
         }
     }

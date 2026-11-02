@@ -108,6 +108,7 @@ impl Oidc {
         v.set_issuer(&[&self.cfg.issuer]);
         v.set_audience(&[&self.cfg.audience]);
         v.leeway = 60;
+        v.validate_nbf = true;
         let claims: Value = decode::<Value>(jwt, &key, &v).map_err(|_| Error::Unauthorized)?.claims;
         let user = match &self.cfg.user_claim {
             Some(c) => claims[c].as_str(),

@@ -62,24 +62,50 @@ fn review_diff(st: &St, az: &cambium_core::Authz, r: &str, rv: &cambium_core::re
     let (mb, ms): (Manifest, Manifest) = (az.filter(st.manifest(r, &base)?), az.filter(st.manifest(r, &s)?));
     Ok(st.diff_manifests(&mb, &ms)?)
 }
+/// Paths changed by the review (merge base vs source), unfiltered.
+fn changed_paths(st: &St, r: &str, rv: &cambium_core::review::Review) -> Result<Vec<String>, ApiErr> {
+    let s = st.get_ref(r, &rv.source)?.ok_or_else(|| Error::NotFound(format!("ref {}", rv.source)))?;
+    let t = st.get_ref(r, &rv.target)?.ok_or_else(|| Error::NotFound(format!("ref {}", rv.target)))?;
+    let base = st.merge_base(r, &t, &s)?.unwrap_or(t);
+    let (mb, ms) = (st.manifest(r, &base)?, st.manifest(r, &s)?);
+    let mut out: Vec<String> = ms.iter().filter(|(k, v)| mb.get(*k) != Some(*v)).map(|(k, _)| k.clone()).collect();
+    out.extend(mb.keys().filter(|k| !ms.contains_key(*k)).cloned());
+    Ok(out)
+}
+/// An approval only counts from someone who can see everything it approves.
+pub(crate) fn approve_checked(st: &St, az: &cambium_core::Authz, r: &str, id: i64, u: &Principal) -> Result<(), ApiErr> {
+    let rv = st.review(r, id)?;
+    if changed_paths(st, r, &rv)?.iter().any(|p| !az.can(p, Perm::Read)) {
+        return Err(ApiErr(Error::Forbidden("read on every path this review changes".into())));
+    }
+    st.approve_as(r, id, u)?;
+    Ok(())
+}
+/// Comments on paths the caller cannot read are left out.
+fn visible_comments(st: &St, az: &cambium_core::Authz, r: &str, id: i64) -> Result<Vec<cambium_core::review::Comment>, ApiErr> {
+    Ok(st.comments(r, id)?.into_iter().filter(|c| c.path.as_deref().is_none_or(|p| p.is_empty() || az.can(p, Perm::Read))).collect())
+}
 async fn show(State(st): State<St>, h: HeaderMap, Path((r, id)): Path<(String, i64)>) -> R {
     let (_, az) = reader(&st, &h, &r)?;
     let rv = st.review(&r, id)?;
     let diff = review_diff(&st, &az, &r, &rv)?;
-    Ok(Json(json!({"review": rv, "comments": st.comments(&r, id)?, "diff": diff})))
+    Ok(Json(json!({"review": rv, "comments": visible_comments(&st, &az, &r, id)?, "diff": diff})))
 }
 async fn comment(State(st): State<St>, h: HeaderMap, Path((r, id)): Path<(String, i64)>, Json(b): Json<NewComment>) -> R {
-    let (u, _) = reader(&st, &h, &r)?;
+    let (u, az) = reader(&st, &h, &r)?;
+    if let Some(p) = b.path.as_deref().filter(|p| !p.is_empty()) {
+        need(az.can(p, Perm::Read), &format!("read on {p}"))?;
+    }
     Ok(Json(json!({"id": st.comment(&r, id, &u.user, b.path.as_deref(), &b.body)?})))
 }
 async fn approve(State(st): State<St>, h: HeaderMap, Path((r, id)): Path<(String, i64)>) -> R {
-    let (u, _) = reader(&st, &h, &r)?;
-    st.approve_as(&r, id, &u)?;
+    let (u, az) = reader(&st, &h, &r)?;
+    approve_checked(&st, &az, &r, id, &u)?;
     Ok(Json(json!(st.review(&r, id)?)))
 }
 async fn merge(State(st): State<St>, h: HeaderMap, Path((r, id)): Path<(String, i64)>) -> R {
     let (u, az) = reader(&st, &h, &r)?;
-    Ok(Json(json!(st.merge_review(&r, id, &u.user, &|f| check_writes(&az, f))?)))
+    Ok(Json(json!(st.merge_review(&r, id, &u.user, &|f| check_writes(&az, f)).map_err(|e| crate::hide_conflicts(e, &az))?)))
 }
 async fn close(State(st): State<St>, h: HeaderMap, Path((r, id)): Path<(String, i64)>) -> R {
     let (u, _) = reader(&st, &h, &r)?;
@@ -184,7 +210,7 @@ fn api_to_ui(e: ApiErr) -> Response {
     ui_err(&e.0, code)
 }
 fn check_csrf(token: &str, got: &str) -> Result<(), Response> {
-    if csrf(token) == got {
+    if cambium_core::blob::ct_eq(&csrf(token), got) {
         Ok(())
     } else {
         Err(ui_err("form expired or forged (CSRF check failed); reload the page", StatusCode::FORBIDDEN))
@@ -350,8 +376,7 @@ async fn review_page(State(st): State<St>, h: HeaderMap, Path((r, id)): Path<(St
         Ok(d) => d,
         Err(e) => return api_to_ui(e),
     };
-    let comments: String = st
-        .comments(&r, id)
+    let comments: String = visible_comments(&st, &az, &r, id)
         .unwrap_or_default()
         .iter()
         .map(|c| {
@@ -402,13 +427,19 @@ struct UiComment {
     path: String,
 }
 async fn ui_comment(State(st): State<St>, h: HeaderMap, Path((r, id)): Path<(String, i64)>, Form(f): Form<UiComment>) -> Response {
-    ui_act(&st, &h, &r, id, &f.csrf, |st, u, _| st.comment(&r, id, &u.user, Some(f.path.trim()), &f.body).map(|_| ()))
+    ui_act(&st, &h, &r, id, &f.csrf, |st, u, az| {
+        let p = f.path.trim();
+        if !p.is_empty() && !az.can(p, Perm::Read) {
+            return Err(Error::Forbidden(format!("read on {p}")));
+        }
+        st.comment(&r, id, &u.user, Some(p), &f.body).map(|_| ())
+    })
 }
 async fn ui_approve(State(st): State<St>, h: HeaderMap, Path((r, id)): Path<(String, i64)>, Form(f): Form<UiAct>) -> Response {
-    ui_act(&st, &h, &r, id, &f.csrf, |st, u, _| st.approve_as(&r, id, u))
+    ui_act(&st, &h, &r, id, &f.csrf, |st, u, az| approve_checked(st, az, &r, id, u).map_err(|e| e.0))
 }
 async fn ui_merge(State(st): State<St>, h: HeaderMap, Path((r, id)): Path<(String, i64)>, Form(f): Form<UiAct>) -> Response {
-    ui_act(&st, &h, &r, id, &f.csrf, |st, u, az| st.merge_review(&r, id, &u.user, &|fs| check_writes(az, fs)).map(|_| ()))
+    ui_act(&st, &h, &r, id, &f.csrf, |st, u, az| st.merge_review(&r, id, &u.user, &|fs| check_writes(az, fs)).map(|_| ()).map_err(|e| crate::hide_conflicts(e, az)))
 }
 fn ui_act(
     st: &St,
