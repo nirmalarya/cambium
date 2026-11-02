@@ -118,20 +118,20 @@ async fn settings(State(st): State<St>, h: HeaderMap, Path(r): Path<String>) -> 
     let refs: String = st.list_refs(&r).unwrap_or_default().iter().map(|(n, _, _)| format!("<option>{}</option>", esc(n))).collect();
     let body = format!(
         r#"{nav}
-<div class=card><h3>Permissions</h3><p class=muted>Longest matching prefix wins. With no rules the repository is open (everyone may write).</p>
+<div class=card><h3>Permissions</h3><p class=muted>Choose who can read or change each folder. The most specific folder wins. Without any rules, everyone can change everything.</p>
 <table><tr><th>Prefix</th><th>Who</th><th>Permission</th><th></th></tr>{rules}</table>
 <form method=post action="/ui/{rq}/settings/acl"><input type=hidden name=csrf value="{c}">
 <input name=prefix placeholder="path prefix (empty = whole repo)" size=28> <input name=principal placeholder="user:name, group:name or *" required size=24>
-<select name=perm><option>read</option><option>write</option><option>admin</option><option>none</option></select> <button>Set rule</button></form></div>
-<div class=card><h3>Branch protection</h3><p class=muted>Protected branches only change through approved reviews.</p>
+<select name=perm><option>read</option><option>write</option><option>admin</option><option>none</option></select> <button>Save rule</button></form></div>
+<div class=card><h3>Branch protection</h3><p class=muted>A protected branch only changes through reviews with enough approvals. Changes that only touch documentation or comments can need fewer.</p>
 <table><tr><th>Branch</th><th>Approvals</th><th>For docs/comment-only changes</th></tr>{prot}</table>
 <form method=post action="/ui/{rq}/settings/protect"><input type=hidden name=csrf value="{c}">
 <select name=refname>{refs}</select> approvals <input name=approvals type=number min=0 max=20 value=1 style="width:4em"> docs/comment-only <input name=trivial placeholder="same" size=5> <button>Save</button>
 <span class=muted>(0 approvals lifts protection)</span></form></div>
-<div class=card><h3>Webhooks</h3><p class=muted>Every move of main and release branches is POSTed, signed with the secret (see docs/deploy.md).</p>
+<div class=card><h3>CI notifications (webhooks)</h3><p class=muted>Notify your CI whenever main or a release branch changes. Each notification is signed with the secret so your CI can check it came from Cambium.</p>
 <table><tr><th>#</th><th>URL</th><th>Failures</th><th>Last error</th><th></th></tr>{hooks}</table>
 <form method=post action="/ui/{rq}/settings/hooks"><input type=hidden name=csrf value="{c}">
-<input name=url placeholder="https://ci.example/hook" required size=36> <input name=secret type=password placeholder="secret (16+ characters)" required minlength=16 size=24> <button>Add webhook</button></form></div>"#,
+<input name=url placeholder="https://ci.example/hook" required size=36> <input name=secret type=password placeholder="secret (16+ characters)" required minlength=16 size=24> <button>Add notification</button></form></div>"#,
         nav = crate::browse::nav(&st, &r, "main", "settings"),
     );
     page(&format!("settings {r}"), Some(&u.user), &body).into_response()

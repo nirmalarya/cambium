@@ -89,9 +89,10 @@ pub(crate) fn nav(st: &St, r: &str, rev: &str, active: &str) -> String {
         }
     };
     format!(
-        r#"<nav class=repo><a href="/ui">Repositories</a> / <b>{rn}</b> &nbsp; {c} {h} {v} {s}
-<form class=inline method=get action="/ui/{rq}/code"><select name=rev>{refs}</select> <button>Go</button></form>
-<form class=inline method=get action="/ui/{rq}/search"><input type=hidden name=rev value="{revq}"><input name=q placeholder="Search code" size=24> <button>Search</button></form></nav>"#,
+        r#"<div class=repohead><div class=trail><a href="/ui">Repositories</a></div><h1>{rn}</h1>
+<nav class=tabs aria-label="Repository">{c} {h} {v} {s}<span class=tools>
+<form class=inline method=get action="/ui/{rq}/code"><label class=muted for=rev-pick>Branch</label> <select id=rev-pick name=rev>{refs}</select> <button>Switch</button></form>
+<form class=inline method=get action="/ui/{rq}/search" role=search><input type=hidden name=rev value="{revq}"><input name=q placeholder="Search this branch" aria-label="Search code" size=22> <button>Search</button></form></span></nav></div>"#,
         rn = esc(r),
         rq = q(r),
         revq = esc(rev),
@@ -114,6 +115,8 @@ fn crumbs(r: &str, rev: &str, path: &str) -> String {
     }
     out
 }
+const ICON_DIR: &str = r#"<svg class="ico dir" viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M1.5 3.5A1.5 1.5 0 0 1 3 2h3.3l1.5 1.5H13A1.5 1.5 0 0 1 14.5 5v7.5A1.5 1.5 0 0 1 13 14H3a1.5 1.5 0 0 1-1.5-1.5z"/></svg>"#;
+const ICON_FILE: &str = r#"<svg class="ico file" viewBox="0 0 16 16" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.3" d="M4 1.75h5.2L12.5 5v9.25H4z M9 1.75V5.2h3.5"/></svg>"#;
 fn human(n: i64) -> String {
     match n {
         n if n >= 1 << 20 => format!("{:.1} MiB", n as f64 / (1 << 20) as f64),
@@ -165,16 +168,16 @@ async fn code(State(st): State<St>, h: HeaderMap, Path(r): Path<String>, Query(l
             };
             let last = last.map_or(String::new(), |c| {
                 format!(
-                    "<a href=\"/ui/{}/cs/{}\" class=muted>{}</a> <span class=muted>{}</span>",
+                    "<a href=\"/ui/{}/cs/{}\" class=muted>{}</a> <span class=muted>on {}</span>",
                     q(&r),
                     q(&c.id),
                     esc(c.message.lines().next().unwrap_or("")),
                     date(c.created_at)
                 )
             });
-            let (icon, size) = if e.kind == "tree" { ("📁", String::new()) } else { ("📄", human(e.size)) };
+            let (icon, size) = if e.kind == "tree" { (ICON_DIR, String::new()) } else { (ICON_FILE, human(e.size)) };
             rows.push_str(&format!(
-                "<tr><td>{icon} <a href=\"/ui/{}/code?rev={}&path={}\">{}{}</a></td><td class=muted>{size}</td><td>{last}</td></tr>",
+                "<tr><td><a class=entry href=\"/ui/{}/code?rev={}&path={}\">{icon}<span>{}{}</span></a></td><td class=muted>{size}</td><td>{last}</td></tr>",
                 q(&r),
                 q(&l.rev),
                 q(&p),
@@ -190,11 +193,17 @@ async fn code(State(st): State<St>, h: HeaderMap, Path(r): Path<String>, Query(l
             }
         }
         if rows.is_empty() {
-            rows = "<tr><td class=muted>(empty)</td></tr>".into();
+            rows = "<tr><td class=empty>Nothing here yet. Add files with <code>cmb add</code> and land them with <code>cmb commit</code>.</td></tr>".into();
         }
-        let readme = readme.map_or(String::new(), |(n, t)| format!("<div class=card><h3>{}</h3><pre>{}</pre></div>", esc(&n), esc(&t)));
+        let readme = readme.map_or(String::new(), |(n, t)| {
+            format!(
+                "<div class=card><h3>{}</h3><pre style=\"white-space:pre-wrap;font:14px/1.6 var(--sans)\">{}</pre></div>",
+                esc(&n),
+                esc(&t)
+            )
+        });
         let body = format!(
-            "{}<div class=card><p>{} <span class=muted>at {}</span></p><table>{rows}</table></div>{readme}",
+            "{}<p class=path>{} <span class=at>at <code>{}</code></span></p><div class=card style=\"padding:.4rem .8rem\"><table class=files>{rows}</table></div>{readme}",
             nav(&st, &r, &l.rev, "code"),
             crumbs(&r, &l.rev, &path),
             short(&cs)
@@ -204,7 +213,7 @@ async fn code(State(st): State<St>, h: HeaderMap, Path(r): Path<String>, Query(l
     // a file
     let Some(e) = ent.filter(|_| az.can(&path, Perm::Read)) else { return not_found() };
     let actions = format!(
-        "<a href=\"/ui/{rq}/raw?rev={rv}&path={pq}\">Raw</a> · <a href=\"/ui/{rq}/blame?rev={rv}&path={pq}\">Blame</a> · <a href=\"/ui/{rq}/history?rev={rv}&path={pq}\">History</a>",
+        "<a href=\"/ui/{rq}/blame?rev={rv}&path={pq}\">Blame</a> <a href=\"/ui/{rq}/history?rev={rv}&path={pq}\">History</a> <a href=\"/ui/{rq}/raw?rev={rv}&path={pq}\">Download</a>",
         rq = q(&r),
         rv = q(&l.rev),
         pq = q(&path)
@@ -221,7 +230,7 @@ async fn code(State(st): State<St>, h: HeaderMap, Path(r): Path<String>, Query(l
         }
     };
     let body = format!(
-        "{}<div class=card><p>{} <span class=muted>{} · {} · at {}</span></p><p>{actions}</p>{content}</div>",
+        "{}<p class=path>{} <span class=at>{}, {}, at <code>{}</code></span></p><div class=actions>{actions}</div><div class=\"card scroll\" style=\"padding:.6rem 0\">{content}</div>",
         nav(&st, &r, &l.rev, "code"),
         crumbs(&r, &l.rev, &path),
         esc(&e.kind),
@@ -363,7 +372,7 @@ async fn changeset(State(st): State<St>, h: HeaderMap, Path((r, id)): Path<(Stri
         })
         .collect();
     let body = format!(
-        "{}<div class=card><h3>{}</h3><pre>{}</pre><p class=muted>{} · {} · <code>{}</code> · parents {parents}· <a href=\"/ui/{}/code?rev={}\">browse files</a></p><ul>{files}</ul></div><div class=card><pre class=diff>{}</pre></div>",
+        "{}<div class=card><h2>{}</h2><pre style=\"white-space:pre-wrap;font:14px/1.6 var(--sans)\">{}</pre><p class=meta>By {} on {}. Changeset <code>{}</code>, parents {parents}. <a href=\"/ui/{}/code?rev={}\">Browse files at this changeset</a></p><ul>{files}</ul></div><div class=card><pre class=diff>{}</pre></div>",
         nav(&st, &r, "main", "history"),
         esc(c.message.lines().next().unwrap_or("")),
         esc(c.message.split_once('\n').map_or("", |x| x.1).trim()),

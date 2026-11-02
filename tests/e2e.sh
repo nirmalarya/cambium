@@ -141,12 +141,12 @@ curl -s -D $T/h -o /dev/null -d "token=$BOB" $U/login
 CK="cambium_session=$(grep -i '^set-cookie: cambium_session=' $T/h | sed 's/.*cambium_session=\([^;]*\).*/\1/' | tr -d '\r')"
 ok "W09 UI sign-in sets an HttpOnly SameSite=Strict cookie" 'grep -i "^set-cookie: cambium_session=" $T/h | grep -qi "HttpOnly" && grep -i "^set-cookie" $T/h | grep -qi "SameSite=Strict"'
 curl -s -b "$CK" $U/rev/reviews/1 > $T/rv.html
-ok "W10 UI review page: diff, escaped title, approvals 0/1" 'grep -q "class=\"add\">+direct" $T/rv.html && grep -q "&lt;script&gt;alert(1)&lt;/script&gt;" $T/rv.html && ! grep -q "<script>alert" $T/rv.html && grep -q "<b>0/1</b>" $T/rv.html'
+ok "W10 UI review page: diff, escaped title, approvals 0/1" 'grep -q "class=\"add\">+direct" $T/rv.html && grep -q "&lt;script&gt;alert(1)&lt;/script&gt;" $T/rv.html && ! grep -q "<script>alert" $T/rv.html && grep -q "<b>0 of 1</b>" $T/rv.html'
 ok "W11 UI lists reviews for the repo" 'curl -s -b "$CK" $U/rev | grep -q "/ui/rev/reviews/1"'
 CSRF=$(grep -o 'name=csrf value="[0-9a-f]*"' $T/rv.html | head -1 | grep -o '[0-9a-f]\{32\}')
 ok "W12 UI action without CSRF value refused" '[ "$(curl -s -o /dev/null -w %{http_code} -b "$CK" -d csrf=bad $U/rev/reviews/1/approve)" = 403 ]'
 ok "W13 UI comment" '[ "$(curl -s -o /dev/null -w %{http_code} -b "$CK" --data-urlencode "csrf=$CSRF" --data-urlencode "body=nice <i>work</i>" $U/rev/reviews/1/comments)" = 303 ] && curl -s -b "$CK" $U/rev/reviews/1 | grep -q "nice &lt;i&gt;work&lt;/i&gt;"'
-ok "W14 UI approve" '[ "$(curl -s -o /dev/null -w %{http_code} -b "$CK" -d csrf=$CSRF $U/rev/reviews/1/approve)" = 303 ] && curl -s -b "$CK" $U/rev/reviews/1 | grep -q "<b>1/1</b>"'
+ok "W14 UI approve" '[ "$(curl -s -o /dev/null -w %{http_code} -b "$CK" -d csrf=$CSRF $U/rev/reviews/1/approve)" = 303 ] && curl -s -b "$CK" $U/rev/reviews/1 | grep -q "<b>1 of 1</b>"'
 ok "W15 UI merge lands the review on main" '[ "$(curl -s -o /dev/null -w %{http_code} -b "$CK" -d csrf=$CSRF $U/rev/reviews/1/merge)" = 303 ] && cmb review list | grep -q "^#1 *merged" && cmb sync >/dev/null 2>&1 && grep -q direct a.txt && ! cmb status | grep -q drafts'
 ok "W16 review show (CLI) includes the comment" 'cmb review show 1 | grep -q "bob: nice"'
 ok "W17 UI cookie holds a server-side session id, never the API token" 'echo "$CK" | grep -q "^cambium_session=cmbs_" && ! grep -qi "$BOB" $T/h'

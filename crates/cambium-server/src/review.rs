@@ -191,30 +191,89 @@ const FAVICON: &str = include_str!("../../../docs/brand/logo/favicon.svg");
 async fn favicon() -> Response {
     ([(header::CONTENT_TYPE, "image/svg+xml"), (header::CACHE_CONTROL, "public, max-age=86400")], FAVICON).into_response()
 }
+/// The UI's one stylesheet. The page reads as a trunk cross-section: the header is the
+/// bark, a thin bright line under it is the cambium (the brand colour, used only where
+/// something new happens: focus, primary actions, added lines), the page is sapwood.
+const CSS: &str = r#"
+:root{--bark:#1d5c45;--bark-deep:#154736;--cambium:#3ccf86;--sap:#f4f7f5;--surface:#fff;--ink:#16201b;--soft:#4f6157;
+--rule:#dbe3de;--heart:#8a6a3a;--danger:#b42318;--add-bg:#e8f7ee;--del-bg:#fdecea;--serif:Charter,"Bitstream Charter","Sitka Text",Cambria,Georgia,serif;
+--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+@media (prefers-color-scheme:dark){:root{--sap:#0e1a15;--surface:#14241d;--ink:#e3ece6;--soft:#9cb0a5;--rule:#253830;--heart:#c9a36a;
+--add-bg:#12301f;--del-bg:#3a1a17;--danger:#f2877c}}
+*{box-sizing:border-box}
+body{margin:0;font:15px/1.55 var(--sans);color:var(--ink);background:var(--sap)}
+a{color:var(--bark)} @media (prefers-color-scheme:dark){a{color:var(--cambium)}}
+a:hover{text-decoration-thickness:2px}
+:focus-visible{outline:3px solid var(--cambium);outline-offset:2px}
+header.site{background:var(--bark);color:#fff;border-bottom:3px solid var(--cambium);padding:.55rem 1.25rem;display:flex;justify-content:space-between;align-items:center;gap:1rem}
+header.site a.brand{color:#fff;text-decoration:none;display:flex;align-items:center;gap:.55rem;font:600 1.15rem/1 var(--serif)}
+header.site .who{display:flex;align-items:center;gap:.75rem;font-size:14px;color:#e3efe8}
+header.site .who button{background:transparent;border:1px solid rgba(255,255,255,.45);color:#fff;padding:.25rem .7rem}
+header.site .who button:hover{background:rgba(255,255,255,.1)}
+main{max-width:1120px;margin:0 auto;padding:1.75rem 1.25rem 4rem}
+h1,h2,h3{font-family:var(--serif);font-weight:600;line-height:1.25;margin:0 0 .75rem}
+h1{font-size:1.75rem} h2{font-size:1.45rem} h3{font-size:1.15rem}
+p{max-width:75ch}
+.muted{color:var(--soft)} .err{color:var(--danger)}
+code,pre,.mono{font-family:var(--mono);font-size:13px}
+.card{background:var(--surface);border:1px solid var(--rule);border-radius:10px;padding:1.25rem 1.4rem;margin-bottom:1.5rem}
+table{width:100%;border-collapse:collapse}
+th{font-weight:600;font-size:13px;color:var(--soft);text-align:left;padding:.45rem .6rem;border-bottom:1px solid var(--rule)}
+td{padding:.5rem .6rem;border-bottom:1px solid var(--rule);vertical-align:top}
+tr:last-child td{border-bottom:0}
+table.files td:first-child{white-space:nowrap}
+table.files a.entry{display:inline-flex;align-items:center;gap:.5rem;text-decoration:none;color:var(--ink);font-weight:500}
+table.files a.entry:hover span{text-decoration:underline}
+svg.ico{width:16px;height:16px;flex:none} svg.ico.dir{color:var(--heart)} svg.ico.file{color:var(--soft)}
+.repohead{margin-bottom:1.25rem}
+.repohead .trail{font-size:14px;color:var(--soft);margin-bottom:.2rem} .repohead .trail a{color:var(--soft)}
+.repohead h1{margin:0 0 .7rem}
+nav.tabs{display:flex;flex-wrap:wrap;align-items:flex-end;gap:.25rem 1.5rem;border-bottom:1px solid var(--rule)}
+nav.tabs a,nav.tabs b{padding:.45rem 0;text-decoration:none;color:var(--soft);font-weight:500;border-bottom:3px solid transparent;margin-bottom:-1px}
+nav.tabs b{color:var(--ink);border-bottom-color:var(--cambium)}
+nav.tabs a:hover{color:var(--ink)}
+nav.tabs .tools{margin-left:auto;display:flex;gap:.5rem;padding-bottom:.4rem;flex-wrap:wrap}
+nav.tabs .tools button{background:transparent;color:var(--ink);border:1px solid var(--rule);font-weight:500}
+nav.tabs .tools button:hover{background:var(--surface);border-color:var(--soft)}
+.path{font-size:15px;margin:0 0 1rem} .path .at{color:var(--soft);font-size:13px;margin-left:.4rem}
+.meta{color:var(--soft);font-size:14px;margin:.25rem 0 1rem}
+.actions{display:flex;gap:1rem;margin:.25rem 0 1rem;font-size:14px}
+table.code{font:13px/1.5 var(--mono);width:auto;min-width:100%}
+table.code td{border:0;padding:0 .75rem}
+td.ln{color:var(--soft);text-align:right;user-select:none;width:1%;white-space:nowrap} td.ln a{color:inherit;text-decoration:none}
+td.code{white-space:pre}
+table.code tr:target{background:var(--add-bg)} table.code tr:target td.ln{color:var(--ink);font-weight:600}
+.scroll{overflow-x:auto}
+pre.diff{background:var(--surface);border:1px solid var(--rule);border-radius:8px;padding:.75rem 0;overflow:auto;font:13px/1.5 var(--mono)}
+pre.diff span{display:block;padding:0 1rem}
+.add{background:var(--add-bg)} .del{background:var(--del-bg)} .hunk{color:var(--soft)}
+.badge{display:inline-block;padding:.05rem .55rem;border-radius:999px;background:var(--sap);border:1px solid var(--rule);font-size:12px;color:var(--soft)}
+.ok{background:var(--add-bg);color:var(--ink);border-color:transparent} .warn{background:var(--del-bg);color:var(--ink);border-color:transparent}
+input,textarea,select{font:inherit;color:var(--ink);background:var(--surface);padding:.4rem .55rem;border:1px solid var(--rule);border-radius:6px}
+textarea{width:100%;min-height:5rem}
+button{font:inherit;font-weight:600;background:var(--bark);color:#fff;border:0;border-radius:6px;padding:.42rem .95rem;cursor:pointer}
+button:hover{background:var(--bark-deep)} button[disabled]{opacity:.5;cursor:not-allowed}
+form.inline{display:inline}
+.empty{padding:1.5rem 0;color:var(--soft)}
+@media (max-width:640px){main{padding:1.25rem .9rem 3rem} nav.tabs .tools{margin-left:0} td.ln{display:none}}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+"#;
+
 pub(crate) fn page(title: &str, who: Option<&str>, body: &str) -> Html<String> {
     Html(format!(
         r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{t} · Cambium</title><style>
-body{{font:15px/1.5 system-ui,sans-serif;margin:0;color:#16201b;background:#f3f6f4}}
-header{{background:#1d5c45;color:#fff;padding:.6rem 1.2rem;display:flex;justify-content:space-between;align-items:center}}
-header a{{color:#fff;text-decoration:none;font-weight:600}} header a.brand{{display:flex;align-items:center;gap:.5rem}} nav.repo a,nav.repo b{{margin-right:1rem}} nav.repo{{margin-bottom:.8rem}}
-td.ln{{color:#7a8a82;text-align:right;user-select:none;width:1%;white-space:nowrap;font:13px/1.4 ui-monospace,monospace}} td.code{{font:13px/1.4 ui-monospace,monospace;white-space:pre;padding:0 .5rem}}
-table.code td{{border:0;padding:0 .4rem}} .muted{{color:#5b6b63}} main{{max-width:980px;margin:1.2rem auto;padding:0 1rem}}
-.card{{background:#fff;border:1px solid #d5ded9;border-radius:6px;padding:1rem;margin-bottom:1rem}}
-table{{width:100%;border-collapse:collapse}} td,th{{text-align:left;padding:.35rem;border-bottom:1px solid #e3e9e5}}
-pre.diff{{background:#fbfcfb;border:1px solid #d5ded9;padding:.6rem;overflow:auto;font:13px/1.4 ui-monospace,monospace}}
-.add{{color:#1d6b3a}} .del{{color:#b42318}} .hunk{{color:#5b6b63}} .badge{{padding:.1rem .45rem;border-radius:4px;background:#e3e9e5;font-size:12px}}
-.ok{{background:#d9efe0;color:#1d6b3a}} .warn{{background:#f8e1df;color:#b42318}}
-input,textarea,select{{font:inherit;padding:.35rem;border:1px solid #b9c6bf;border-radius:4px}} textarea{{width:100%;min-height:5rem}}
-button{{font:inherit;background:#1d5c45;color:#fff;border:0;border-radius:4px;padding:.4rem .9rem;cursor:pointer}}
-.err{{color:#b42318}} form.inline{{display:inline}}
-</style><link rel=icon type="image/svg+xml" href="/favicon.svg"></head><body><header><a href="/ui" class=brand>{logo}Cambium</a><span>{w}</span></header><main>{body}</main></body></html>"#,
+<title>{t} – Cambium</title><style>{css}</style><link rel=icon type="image/svg+xml" href="/favicon.svg"></head>
+<body><header class=site><a href="/ui" class=brand>{logo}Cambium</a><span class=who>{w}</span></header><main>{body}</main></body></html>"#,
         t = esc(title),
+        css = CSS,
         logo = LOGO_ON_DARK
-            .replacen("<svg ", "<svg width=\"22\" height=\"22\" aria-hidden=\"true\" ", 1)
+            .replacen("<svg ", "<svg width=\"24\" height=\"24\" aria-hidden=\"true\" ", 1)
             .replace("<title>Cambium</title>", ""),
         w = who
-            .map(|u| format!("{} · <form class=inline method=post action=/ui/logout><button>Sign out</button></form>", esc(u)))
+            .map(|u| format!(
+                "<span>Signed in as {}</span><form class=inline method=post action=/ui/logout><button>Sign out</button></form>",
+                esc(u)
+            ))
             .unwrap_or_default()
     ))
 }
@@ -484,7 +543,7 @@ async fn review_page(State(st): State<St>, h: HeaderMap, Path((r, id)): Path<(St
         String::new()
     };
     page(&format!("#{id} {}", rv.title), Some(&u.user), &format!(r#"<div class=card><h2>#{id} {t}</h2>
-<p><code>{s}</code> → <code>{tg}</code> by <b>{a}</b> · <span class="badge {sb}">{state}</span> · <span class=badge>{kind}</span> · approvals <b>{n}/{req}</b> {who}</p>{owners}{actions}</div>
+<p class=meta><span class="badge {sb}">{state}</span> <span class=badge>{kind}</span> Changeset <code>{s}</code> into <code>{tg}</code>, by {a}. Approvals: <b>{n} of {req}</b> {who}</p>{owners}{actions}</div>
 <div class=card><h3>Changes</h3><pre class=diff>{d}</pre></div>
 <h3>Comments</h3>{comments}
 <div class=card><form method=post action="/ui/{rn}/reviews/{id}/comments"><input type=hidden name=csrf value="{c}">
