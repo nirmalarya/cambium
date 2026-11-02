@@ -50,7 +50,7 @@ Earlier centralized systems (CVS, Subversion, Perforce) and Google's Piper are a
 
 ## Known issues
 Cambium is early alpha. Security and data-integrity hardening is in progress; open items include
-rate-limit keying, filesystem blob-store write durability, three-way merges of binary files,
+filesystem blob-store write durability, three-way merges of binary files,
 session revocation, and removal of the offline commit outbox (`outbox`/`flush`).
 Do not use it for production data yet.
 
