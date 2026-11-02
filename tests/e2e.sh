@@ -138,6 +138,7 @@ ok "W14 UI approve" '[ "$(curl -s -o /dev/null -w %{http_code} -b "$CK" -d csrf=
 ok "W15 UI merge lands the review on main" '[ "$(curl -s -o /dev/null -w %{http_code} -b "$CK" -d csrf=$CSRF $U/rev/reviews/1/merge)" = 303 ] && cmb review list | grep -q "^#1 *merged" && cmb sync >/dev/null 2>&1 && grep -q direct a.txt && ! cmb status | grep -q drafts'
 ok "W16 review show (CLI) includes the comment" 'cmb review show 1 | grep -q "bob: nice"'
 ok "W17 UI cookie holds a server-side session id, never the API token" 'echo "$CK" | grep -q "^cambium_session=cmbs_" && ! grep -qi "$BOB" $T/h'
+ok "UI01 code browser lists files, shows a file, its blame and history" 'curl -s -b "$CK" "$U/rev/code" | grep -q "a.txt" && curl -s -b "$CK" "$U/rev/code?path=a.txt" | grep -q "direct" && curl -s -b "$CK" "$U/rev/blame?path=a.txt" | grep -q "/ui/rev/cs/" && curl -s -b "$CK" "$U/rev/history" | grep -q "<code>"'
 # semantic review rules: docs/comment-only changes may need fewer approvals
 (cd $T && cmb init sem sm >/dev/null 2>&1 && cd sm && printf "fn f() -> u8 { 1 }\n" > lib.rs && echo hi > README.md && cmb add lib.rs README.md >/dev/null && cmb commit -m base >/dev/null && cmb protect main 2 --trivial 1 >/dev/null)
 ok "W30 protection lists the docs/comment-only rule" '(cd $T/sm && cmb protect | grep -q "main .*2 approval(s) (1 for docs/comment-only changes)")'

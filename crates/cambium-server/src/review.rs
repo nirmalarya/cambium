@@ -169,13 +169,15 @@ pub fn esc(s: &str) -> String {
         })
         .collect()
 }
-fn page(title: &str, who: Option<&str>, body: &str) -> Html<String> {
+pub(crate) fn page(title: &str, who: Option<&str>, body: &str) -> Html<String> {
     Html(format!(
         r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{t} · Cambium</title><style>
 body{{font:15px/1.5 system-ui,sans-serif;margin:0;color:#16201b;background:#f3f6f4}}
 header{{background:#1d5c45;color:#fff;padding:.6rem 1.2rem;display:flex;justify-content:space-between;align-items:center}}
-header a{{color:#fff;text-decoration:none;font-weight:600}} main{{max-width:980px;margin:1.2rem auto;padding:0 1rem}}
+header a{{color:#fff;text-decoration:none;font-weight:600}} nav.repo a,nav.repo b{{margin-right:1rem}} nav.repo{{margin-bottom:.8rem}}
+td.ln{{color:#7a8a82;text-align:right;user-select:none;width:1%;white-space:nowrap;font:13px/1.4 ui-monospace,monospace}} td.code{{font:13px/1.4 ui-monospace,monospace;white-space:pre;padding:0 .5rem}}
+table.code td{{border:0;padding:0 .4rem}} .muted{{color:#5b6b63}} main{{max-width:980px;margin:1.2rem auto;padding:0 1rem}}
 .card{{background:#fff;border:1px solid #d5ded9;border-radius:6px;padding:1rem;margin-bottom:1rem}}
 table{{width:100%;border-collapse:collapse}} td,th{{text-align:left;padding:.35rem;border-bottom:1px solid #e3e9e5}}
 pre.diff{{background:#fbfcfb;border:1px solid #d5ded9;padding:.6rem;overflow:auto;font:13px/1.4 ui-monospace,monospace}}
@@ -184,7 +186,7 @@ pre.diff{{background:#fbfcfb;border:1px solid #d5ded9;padding:.6rem;overflow:aut
 input,textarea,select{{font:inherit;padding:.35rem;border:1px solid #b9c6bf;border-radius:4px}} textarea{{width:100%;min-height:5rem}}
 button{{font:inherit;background:#1d5c45;color:#fff;border:0;border-radius:4px;padding:.4rem .9rem;cursor:pointer}}
 .err{{color:#b42318}} form.inline{{display:inline}}
-</style></head><body><header><a href="/ui">Cambium · Reviews</a><span>{w}</span></header><main>{body}</main></body></html>"#,
+</style></head><body><header><a href="/ui">Cambium</a><span>{w}</span></header><main>{body}</main></body></html>"#,
         t = esc(title),
         w = who
             .map(|u| format!("{} · <form class=inline method=post action=/ui/logout><button>Sign out</button></form>", esc(u)))
@@ -203,13 +205,13 @@ fn csrf(token: &str) -> String {
     hash_bytes(format!("cambium-csrf\n{token}").as_bytes())[..32].to_string()
 }
 /// Signed-in principal for UI pages, or a redirect to the sign-in form.
-fn ui_user(st: &St, h: &HeaderMap) -> Result<(Principal, String), Response> {
+pub(crate) fn ui_user(st: &St, h: &HeaderMap) -> Result<(Principal, String), Response> {
     let t = cookie_token(h).ok_or_else(|| Redirect::to("/ui/login").into_response())?;
     let u = st.session_principal(&t).map_err(|_| Redirect::to("/ui/login").into_response())?;
     crate::obs::set_actor(&u.user);
     Ok((u, t))
 }
-fn ui_err(e: impl std::fmt::Display, code: StatusCode) -> Response {
+pub(crate) fn ui_err(e: impl std::fmt::Display, code: StatusCode) -> Response {
     (
         code,
         page(
@@ -220,7 +222,7 @@ fn ui_err(e: impl std::fmt::Display, code: StatusCode) -> Response {
     )
         .into_response()
 }
-fn api_to_ui(e: ApiErr) -> Response {
+pub(crate) fn api_to_ui(e: ApiErr) -> Response {
     let code = match &e.0 {
         Error::Forbidden(_) => StatusCode::FORBIDDEN,
         Error::NotFound(_) => StatusCode::NOT_FOUND,
@@ -237,7 +239,7 @@ fn check_csrf(token: &str, got: &str) -> Result<(), Response> {
         Err(ui_err("form expired or forged (CSRF check failed); reload the page", StatusCode::FORBIDDEN))
     }
 }
-fn diff_html(d: &str) -> String {
+pub(crate) fn diff_html(d: &str) -> String {
     d.lines()
         .map(|l| {
             let c = if l.starts_with("+++") || l.starts_with("---") {
@@ -313,12 +315,15 @@ async fn home(State(st): State<St>, h: HeaderMap) -> Response {
             continue;
         }
         let open = st.reviews(&r, Some("open")).map(|v| v.len()).unwrap_or(0);
-        rows.push_str(&format!("<tr><td><a href=\"/ui/{0}\">{0}</a></td><td>{open} open</td></tr>", esc(&r)));
+        rows.push_str(&format!(
+            "<tr><td><a href=\"/ui/{0}/code\">{0}</a></td><td><a href=\"/ui/{0}/history\">history</a></td><td><a href=\"/ui/{0}\">{open} open review(s)</a></td></tr>",
+            esc(&r)
+        ));
     }
     page(
         "Repositories",
         Some(&u.user),
-        &format!("<div class=card><h2>Repositories</h2><table><tr><th>Repo</th><th>Reviews</th></tr>{rows}</table></div>"),
+        &format!("<div class=card><h2>Repositories</h2><table><tr><th>Repo</th><th></th><th>Reviews</th></tr>{rows}</table></div>"),
     )
     .into_response()
 }
@@ -347,11 +352,11 @@ async fn repo_page(State(st): State<St>, h: HeaderMap, Path(r): Path<String>) ->
     let branches: String = st.list_refs(&r).unwrap_or_default().iter().map(|(n, _, _)| format!("<option>{}</option>", esc(n))).collect();
     let prot: String =
         st.protected_refs(&r).unwrap_or_default().iter().map(|(n, k)| format!("<span class=badge>{} needs {k}</span> ", esc(n))).collect();
-    page(&r, Some(&u.user), &format!(r#"<div class=card><h2>{rn} — reviews</h2><p>Protected: {prot}</p>
+    page(&r, Some(&u.user), &format!(r#"{nav}<div class=card><h2>{rn} — reviews</h2><p>Protected: {prot}</p>
 <table><tr><th>#</th><th>Title</th><th>Branches</th><th>Author</th><th>State</th><th>Approvals</th></tr>{rows}</table></div>
 <div class=card><h3>New review</h3><form method=post action="/ui/{rn}/reviews"><input type=hidden name=csrf value="{c}">
 <input name=title placeholder=Title required size=40> <select name=source>{branches}</select> → <select name=target>{branches}</select> <button>Open review</button></form></div>"#,
-        rn = esc(&r), c = csrf(&tok))).into_response()
+        rn = esc(&r), c = csrf(&tok), nav = crate::browse::nav(&st, &r, "main", "reviews"))).into_response()
 }
 #[derive(Deserialize)]
 struct UiNew {

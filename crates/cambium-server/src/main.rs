@@ -25,6 +25,7 @@ use std::sync::Arc;
 
 mod admin;
 mod auth;
+mod browse;
 mod edge;
 mod obs;
 mod review;
@@ -136,7 +137,7 @@ pub(crate) fn check_writes(az: &cambium_core::Authz, files: &[FileChange]) -> ca
     Ok(())
 }
 /// Hide files the caller may not read; drop changesets that only touched such files.
-fn redact(az: &cambium_core::Authz, mut cs: cambium_core::Changeset) -> Option<cambium_core::Changeset> {
+pub(crate) fn redact(az: &cambium_core::Authz, mut cs: cambium_core::Changeset) -> Option<cambium_core::Changeset> {
     if az.open() {
         return Some(cs);
     }
@@ -748,6 +749,7 @@ pub fn app(st: St, lim: Arc<RateLimiter>) -> Router {
         .route("/v1/blobs/:id", get(get_blob))
         .merge(review::api())
         .merge(review::ui())
+        .merge(browse::ui())
         .layer(middleware::from_fn_with_state(st.clone(), idempotent))
         .layer(middleware::from_fn_with_state((st.clone(), lim), limit))
         .layer(DefaultBodyLimit::max(max_body()))
@@ -1189,6 +1191,73 @@ mod tests {
             assert_eq!(r.status(), 404, "{path}");
         }
         assert_eq!(app.oneshot(get(&format!("/v1/repos/r/trees/{pay}?path=pay"), &alice, None)).await.unwrap().status(), 200);
+    }
+
+    /// Code browser pages apply per-directory permissions and escape file content.
+    #[tokio::test]
+    async fn code_browser_respects_permissions_and_escapes() {
+        let (app, _alice, e, _d) = setup(0.0, 1.0);
+        let root = e.create_repo("r", "alice").unwrap();
+        let fc = |p: &str, c: &str| cambium_core::FileChange {
+            path: p.into(),
+            blob: Some(e.put_blob(c.as_bytes()).unwrap()),
+            mode: cambium_core::engine::MODE_FILE,
+        };
+        let c1 = e
+            .commit("r", "main", &root, "alice", "public things", vec![fc("pub/a.html", "<script>alert(1)</script>\nline two\n")])
+            .unwrap()
+            .id;
+        e.commit("r", "main", &c1, "alice", "salaries update", vec![fc("pay/s.txt", "salaries 100\n")]).unwrap();
+        let a = Principal { user: "alice".into(), groups: vec![] };
+        e.set_acl("r", &a, "", "user:alice", Some(Perm::Admin)).unwrap();
+        e.set_acl("r", &a, "pub", "user:bob", Some(Perm::Read)).unwrap();
+        let bob = Principal { user: "bob".into(), groups: vec![] };
+        let sid = e.create_session(&bob, 3600, "x.y.z", None).unwrap();
+        let page = |uri: &str| {
+            let app = app.clone();
+            let uri = uri.to_string();
+            let sid = sid.clone();
+            async move {
+                let r = app
+                    .oneshot(Req::get(&uri).header("cookie", format!("cambium_session={sid}")).body(Body::empty()).unwrap())
+                    .await
+                    .unwrap();
+                let status = r.status();
+                let headers = r.headers().clone();
+                (status, headers, String::from_utf8_lossy(&to_bytes(r.into_body(), 1 << 20).await.unwrap()).to_string())
+            }
+        };
+        let (s, _, b) = page("/ui/r/code").await;
+        assert_eq!(s, 200);
+        assert!(b.contains("pub/") && !b.contains("pay"), "hidden dir not listed");
+        let (s, _, b) = page("/ui/r/code?path=pub/a.html").await;
+        assert_eq!(s, 200);
+        assert!(b.contains("&lt;script&gt;alert(1)&lt;/script&gt;") && !b.contains("<script>alert"), "content escaped");
+        for uri in [
+            "/ui/r/code?path=pay",
+            "/ui/r/code?path=pay/s.txt",
+            "/ui/r/raw?path=pay/s.txt",
+            "/ui/r/blame?path=pay/s.txt",
+            "/ui/r/history?path=pay",
+        ] {
+            assert_eq!(page(uri).await.0, 404, "{uri}");
+        }
+        let (s, h, b) = page("/ui/r/raw?path=pub/a.html").await;
+        assert_eq!(s, 200);
+        assert_eq!(h["content-type"], "application/octet-stream");
+        assert!(h["content-disposition"].to_str().unwrap().starts_with("attachment"));
+        assert!(b.contains("<script>"), "raw bytes are served as a download");
+        let (_, _, b) = page("/ui/r/history").await;
+        assert!(b.contains("public things") && !b.contains("salaries"), "pay-only changeset hidden");
+        let (s, _, b) = page("/ui/r/blame?path=pub/a.html").await;
+        assert!(s == 200 && b.contains("line two"));
+        let (_, _, b) = page("/ui/r/search?q=salaries").await;
+        assert!(b.contains("0 result(s)"), "search does not leak hidden files");
+        let (_, _, b) = page(&format!("/ui/r/cs/{c1}")).await;
+        assert!(b.contains("public things") && b.contains("pub/a.html"));
+        // signed out: sent to the sign-in page
+        let r = app.oneshot(Req::get("/ui/r/code").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(r.status(), 303);
     }
 
     // ---------- OIDC + per-directory permissions over HTTP ----------
