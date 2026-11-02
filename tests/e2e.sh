@@ -5,6 +5,9 @@ BIN=${BIN:-${CARGO_TARGET_DIR:-target}/debug}
 T=$(mktemp -d); export CAMBIUM_DATA=$T/data CAMBIUM_ADDR=127.0.0.1:${PORT:-7979} CAMBIUM_CACHE=$T/cache
 export CAMBIUM_SERVER=http://$CAMBIUM_ADDR
 pass=0; fail=0
+# portable helpers (GNU/Linux and macOS/BSD)
+fmode(){ stat -c %a "$1" 2>/dev/null || python3 -c 'import os,sys; print(format(os.stat(sys.argv[1]).st_mode & 0o7777, "o"))' "$1"; }
+fsize(){ wc -c < "$1" | tr -d ' '; }
 ok(){ if eval "$2" >/dev/null 2>&1; then pass=$((pass+1)); echo "PASS $1"; else fail=$((fail+1)); echo "FAIL $1"; fi; }
 export CAMBIUM_TOKEN=$($BIN/cmbd token alice)
 $BIN/cmbd & SRV=$!; trap 'kill $SRV; rm -rf $T' EXIT
@@ -47,7 +50,9 @@ ok "F06 sparse widen" '(cd sp && cmb sparse add docs && [ -e docs/readme.md ])'
 ok "F07 API-only read (no working copy)" 'cmb cat demo main src/lib.rs | grep -q inserted'
 ok "F02 stale head rejected with hint" '(cd sp && echo z > src/z.rs && cmb add src && (cd ../wc2 && echo q > docs/q.md && cmb add docs && cmb commit -m q) && cmb commit -m z 2>&1 | grep -q "cmb sync")'
 ok "F08 cache bounded" 'CAMBIUM_CACHE_MAX=1 cmb checkout demo tiny >/dev/null 2>&1; [ $(ls $CAMBIUM_CACHE | wc -l) -le 1 ]'
-ok "path traversal rejected by server" '[ "$(curl -s -o /dev/null -w %{http_code} -H "Authorization: Bearer $CAMBIUM_TOKEN" -H content-type:application/json -d "{\"ref\":\"main\",\"expected\":\"x\",\"message\":\"m\",\"files\":[{\"path\":\"../evil\",\"blob\":null}]}" $CAMBIUM_SERVER/v1/repos/demo/commit)" != 200 ]'
+HEAD_ID=$(curl -s -H "Authorization: Bearer $CAMBIUM_TOKEN" $CAMBIUM_SERVER/v1/repos/demo/resolve/main | python3 -c 'import sys,json; print(json.load(sys.stdin)["cs"])')
+TRAV=$(printf '{"ref":"main","expected":"%s","message":"m","files":[{"path":"../evil","blob":null}]}' "$HEAD_ID")
+ok "path traversal rejected by server" '[ "$(curl -s -o /dev/null -w %{http_code} -H "Authorization: Bearer $CAMBIUM_TOKEN" -H content-type:application/json -d "$TRAV" $CAMBIUM_SERVER/v1/repos/demo/commit)" = 400 ]'
 cd $T
 ok "F09 commit without a server fails clearly and keeps the change" '(cd sp && echo off > src/off.rs && cmb add src >/dev/null && out=$(CAMBIUM_SERVER=http://127.0.0.1:1 CAMBIUM_MAX_RETRIES=0 $BIN/cmb commit -m offline 2>&1); [ $? -ne 0 ] && echo "$out" | grep -q "cannot reach server" && [ -e src/off.rs ] && cmb status | grep -q off.rs)'
 (cd wc2 && cmb sync >/dev/null 2>&1 && echo online > docs/on.md && cmb add docs >/dev/null && cmb commit -m online >/dev/null)
@@ -70,7 +75,7 @@ head -c 300000 /dev/urandom | base64 > $T/big.txt
 (cd wc2 && cmb sync >/dev/null 2>&1 && cp $T/big.txt big.txt && cmb add big.txt >/dev/null && cmb commit -m big >/dev/null)
 ok "R01 server answers ranges (206 + Content-Range)" 'id=$(cmb log -n 1 >/dev/null; curl -s -H "Authorization: Bearer $CAMBIUM_TOKEN" -H content-type:application/json -d "{\"rev\":\"main\",\"prefixes\":[\"big.txt\"]}" $CAMBIUM_SERVER/v1/repos/demo/tree | python3 -c "import sys,json;print(json.load(sys.stdin)[\"entries\"][\"big.txt\"].split(\":\")[0])"); curl -s -D - -o /dev/null -H "Authorization: Bearer $CAMBIUM_TOKEN" -H "Range: bytes=100-" $CAMBIUM_SERVER/v1/blobs/$id | grep -qi "content-range: bytes 100-"'
 export RC=$T/rcache
-ok "R02 interrupted fetch leaves a partial and exits" '! CAMBIUM_CACHE=$RC CAMBIUM_FETCH_CHUNK=65536 CAMBIUM_FETCH_ABORT_AFTER=2 cmb cat demo main big.txt >/dev/null 2>$T/r2.err && grep -q "interrupted at byte 131072" $T/r2.err && [ $(stat -c %s $RC-partial/*) = 131072 ]'
+ok "R02 interrupted fetch leaves a partial and exits" '! CAMBIUM_CACHE=$RC CAMBIUM_FETCH_CHUNK=65536 CAMBIUM_FETCH_ABORT_AFTER=2 cmb cat demo main big.txt >/dev/null 2>$T/r2.err && grep -q "interrupted at byte 131072" $T/r2.err && [ $(fsize $RC-partial/*) = 131072 ]'
 ok "R03 rerun resumes at the saved byte and content matches" 'CAMBIUM_CACHE=$RC CAMBIUM_FETCH_CHUNK=65536 cmb cat demo main big.txt 2>$T/r3.err | cmp - $T/big.txt && grep -q "resuming blob .* at byte 131072" $T/r3.err && [ -z "$(ls $RC-partial)" ]'
 ok "R04 checkout resumes an interrupted large file" '! CAMBIUM_CACHE=$T/rc2 CAMBIUM_FETCH_CHUNK=50000 CAMBIUM_FETCH_ABORT_AFTER=3 cmb checkout demo rco >/dev/null 2>&1; rm -rf rco; CAMBIUM_CACHE=$T/rc2 CAMBIUM_FETCH_CHUNK=50000 cmb checkout demo rco 2>&1 | grep -q resuming && cmp rco/big.txt $T/big.txt'
 # ---------- rate limiting (second server with a tight limit) ----------
@@ -122,7 +127,7 @@ ok "W13 UI comment" '[ "$(curl -s -o /dev/null -w %{http_code} -b "$CK" --data-u
 ok "W14 UI approve" '[ "$(curl -s -o /dev/null -w %{http_code} -b "$CK" -d csrf=$CSRF $U/rev/reviews/1/approve)" = 303 ] && curl -s -b "$CK" $U/rev/reviews/1 | grep -q "<b>1/1</b>"'
 ok "W15 UI merge lands the review on main" '[ "$(curl -s -o /dev/null -w %{http_code} -b "$CK" -d csrf=$CSRF $U/rev/reviews/1/merge)" = 303 ] && cmb review list | grep -q "^#1 *merged" && cmb switch main >/dev/null 2>&1 && grep -q direct a.txt'
 ok "W16 review show (CLI) includes the comment" 'cmb review show 1 | grep -q "bob: nice"'
-ok "W17 UI cookie holds a server-side session id, never the API token" 'echo "$CK" | grep -q "^cambium_session=bvs_" && ! grep -qi "$BOB" $T/h'
+ok "W17 UI cookie holds a server-side session id, never the API token" 'echo "$CK" | grep -q "^cambium_session=cmbs_" && ! grep -qi "$BOB" $T/h'
 ok "W18 UI sends security headers" 'curl -s -D - -o /dev/null -b "$CK" $U/rev | tr -d "\r" | grep -qi "^content-security-policy: default-src .none." && curl -s -D - -o /dev/null $U/login | grep -qi "^x-frame-options: DENY"'
 ok "W19 sign-out ends the session server-side" 'curl -s -o /dev/null -b "$CK" -X POST $U/logout && [ "$(curl -s -o /dev/null -w %{http_code} -b "$CK" $U/rev)" = 303 ]'
 
@@ -137,7 +142,7 @@ ok "X04 diff reports renames by content" '(cd $T/sec && P=$(cmb log -n 1 | cut -
 SC=$T/machine-cache
 ok "Y01 first checkout fills the shared cache from the server" '(cd $T && CAMBIUM_SHARED_CACHE=$SC CAMBIUM_STATS=1 cmb checkout rev sc1 2>&1 | grep -q "cambium-stats: 0 from cache, [1-9][0-9]* from server")'
 ok "Y02 another user on the machine reuses it (no server fetches)" '(cd $T && CAMBIUM_TOKEN=$BOB CAMBIUM_CACHE=$T/bobcache CAMBIUM_SHARED_CACHE=$SC CAMBIUM_STATS=1 cmb checkout rev sc2 2>&1 | grep -q "cambium-stats: [1-9][0-9]* from cache, 0 from server") && diff -r --exclude=.cambium $T/sc1 $T/sc2'
-ok "Y03 shared cache dir is group-shared (setgid, no world access)" '[ "$(stat -c %a $SC)" = 2770 ]'
+ok "Y03 shared cache dir is group-shared (setgid, no world access)" '[ "$(fmode $SC)" = 2770 ]'
 F=$(ls $SC | head -1); echo tampered > $SC/$F
 ok "Y04 tampered entry is detected and refetched" '(cd $T && CAMBIUM_SHARED_CACHE=$SC CAMBIUM_STATS=1 cmb checkout rev sc3 2>&1 | grep -q "failed integrity check; refetching") && diff -r --exclude=.cambium $T/sc1 $T/sc3'
 
@@ -181,7 +186,7 @@ if [ -w /dev/fuse ] && command -v fusermount3 >/dev/null; then
   cd $T; MC=$T/mcache
   CAMBIUM_CACHE=$MC cmb mount sec vmnt >$T/mount.log 2>&1 & MP=$!
   for i in $(seq 50); do [ -e vmnt/pub/p.txt ] && break; sleep 0.1; done
-  ok "V01 mount lists the tree without downloading files" '[ -e vmnt/pub/p.txt ] && [ "$(ls -A $MC 2>/dev/null | wc -l)" = 0 ] && [ "$(stat -c %s vmnt/pub/p.txt)" = "$(CAMBIUM_TOKEN=$CAMBIUM_TOKEN cmb cat sec main pub/p.txt | wc -c)" ]'
+  ok "V01 mount lists the tree without downloading files" '[ -e vmnt/pub/p.txt ] && [ "$(ls -A $MC 2>/dev/null | wc -l)" = 0 ] && [ "$(fsize vmnt/pub/p.txt)" = "$(CAMBIUM_TOKEN=$CAMBIUM_TOKEN cmb cat sec main pub/p.txt | wc -c)" ]'
   ok "V02 first read fetches just that file" 'grep -q "^p" vmnt/pub/p.txt && [ "$(ls -A $MC | wc -l)" = 1 ]'
   ok "V03 mount is read-only" '! touch vmnt/new 2>/dev/null && ! sh -c "echo x > vmnt/pub/p.txt" 2>/dev/null'
   fusermount3 -u vmnt 2>/dev/null || { kill $MP; fusermount3 -uz vmnt; }; wait $MP 2>/dev/null

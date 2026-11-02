@@ -255,7 +255,7 @@ async fn login(State(st): State<St>, Form(f): Form<Login>) -> Response {
     };
     crate::obs::set_actor(&who.user);
     let ttl = std::env::var("CAMBIUM_SESSION_TTL").ok().and_then(|v| cambium_core::tokens::parse_ttl(&v).ok().flatten()).unwrap_or(8 * 3600);
-    let sid = match st.create_session(&who, ttl) {
+    let sid = match st.create_session(&who, ttl, &t, crate::auth::jwt_exp(&t)) {
         Ok(s) => s,
         Err(e) => return api_to_ui(ApiErr(e)),
     };

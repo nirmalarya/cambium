@@ -26,6 +26,11 @@ pub const MIGRATIONS: &[Migration] = &[Migration {
     name: "blob_uploads",
     sqlite: include_str!("../../../docs/migrations/0003_blob_uploads.sqlite.sql"),
     pg: include_str!("../../../docs/migrations/0003_blob_uploads.pg.sql"),
+}, Migration {
+    version: 4,
+    name: "session_token",
+    sqlite: include_str!("../../../docs/migrations/0004_session_token.sqlite.sql"),
+    pg: include_str!("../../../docs/migrations/0004_session_token.pg.sql"),
 }];
 pub fn latest() -> i64 {
     MIGRATIONS.last().map_or(1, |m| m.version)

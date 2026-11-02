@@ -127,6 +127,14 @@ impl Oidc {
 }
 
 /// Static tokens first (cheap, local), then OIDC if configured.
+/// `exp` of an already-verified JWT (None for other credentials).
+pub fn jwt_exp(token: &str) -> Option<i64> {
+    use base64::Engine as _;
+    let mut parts = token.split('.');
+    let (_, body, _) = (parts.next()?, parts.next()?, parts.next()?);
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(body.trim_end_matches('=')).ok()?;
+    serde_json::from_slice::<Value>(&raw).ok()?["exp"].as_i64()
+}
 pub fn authenticate(eng: &Engine, oidc: Option<&Oidc>, bearer: &str) -> Result<Principal, Error> {
     if bearer.starts_with("cmbt_") {
         return eng.verify_principal(bearer);

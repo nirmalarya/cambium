@@ -137,7 +137,7 @@ fn pg_tokens_sessions_and_migrations() {
     assert_eq!(b.verify_principal(&t).unwrap().groups, vec!["g".to_string()]);
     let n = a.rotate_token(&u, None, 0).unwrap();
     assert!(b.verify_principal(&t).is_err() && b.verify_principal(&n).is_ok());
-    let s = a.create_session(&Principal::new(&u), 60).unwrap();
+    let s = a.create_session(&Principal::new(&u), 60, "jwt-or-other", None).unwrap();
     assert_eq!(b.session_principal(&s).unwrap().user, u);
     b.end_session(&s).unwrap();
     assert!(a.session_principal(&s).is_err());

@@ -62,7 +62,7 @@ ok "P23 audit covers auth, ACL, ref moves, admin" '(for a in auth.denied acl.cha
 ok "P24 audit rows carry request id and actor" 'grep "\"action\":\"acl.change\"" $T/audit.jsonl | grep -q "\"request_id\":\"[0-9a-f]" && grep -q "\"actor\":\"cli:" $T/audit.jsonl'
 ok "P25 audit verify passes" '$BIN/cmbd audit verify'
 ok "P26 database refuses UPDATE/DELETE on audit_log" '! sqlite3 $CAMBIUM_DATA/cambium.db "UPDATE audit_log SET actor=\"x\" WHERE seq=1" && ! sqlite3 $CAMBIUM_DATA/cambium.db "DELETE FROM audit_log"'
-ok "P27 migrate --status is current" '$BIN/cmbd migrate --status 2>&1 | grep -q "schema at v2 (binary supports up to v2)"'
+ok "P27 migrate --status is current" '$BIN/cmbd migrate --status 2>&1 | grep -qE "schema at v([0-9]+) \(binary supports up to v\1\)"'
 # ---------- code owners ----------
 cd $T; cmb init own ow >/dev/null 2>&1; cd ow
 mkdir pay; printf 'group:payments\n' > pay/OWNERS; echo 1 > pay/x.txt; echo d > doc.txt
@@ -97,7 +97,8 @@ up https://127.0.0.1:$P2 || up https://127.0.0.1:$P2
 P3=$((P+2)); ( CAMBIUM_ADDR=127.0.0.1:$P3 CAMBIUM_SHUTDOWN_DRAIN_S=0 CAMBIUM_SHUTDOWN_GRACE_S=2 $BIN/cmbd 2>&1 >/dev/null | head -c 1 >/dev/null ) &
 for i in $(seq 50); do curl -sf http://127.0.0.1:$P3/healthz >/dev/null && break; sleep 0.1; done
 for i in $(seq 20); do curl -s -o /dev/null -H "Authorization: Bearer $NEW" http://127.0.0.1:$P3/v1/repos; done
-P38PID=$(ss -ltnp | grep ":$P3 " | grep -oE "pid=[0-9]+" | cut -d= -f2)
+P38PID=$( (ss -ltnp 2>/dev/null | grep ":$P3 " | grep -oE "pid=[0-9]+" | cut -d= -f2) ; lsof -nP -tiTCP:$P3 -sTCP:LISTEN 2>/dev/null | head -1)
+P38PID=$(echo $P38PID | awk '{print $1}')
 ok "P38 broken log pipe: server keeps serving and exits on SIGTERM" '[ -n "$P38PID" ] && [ "$(curl -s -o /dev/null -w %{http_code} http://127.0.0.1:$P3/healthz)" = 200 ] && kill $P38PID && for i in $(seq 60); do kill -0 $P38PID 2>/dev/null || break; sleep 0.1; done && ! kill -0 $P38PID 2>/dev/null'
 ok "P34 TLS: serves HTTPS with the configured cert" 'curl -s --cacert $T/ca.pem https://localhost:$P2/healthz --resolve localhost:$P2:127.0.0.1 | grep -q ok'
 ok "P35 TLS: HSTS set, plain HTTP refused" 'curl -sI --cacert $T/ca.pem --resolve localhost:$P2:127.0.0.1 https://localhost:$P2/healthz | grep -qi strict-transport-security && ! curl -sf http://127.0.0.1:$P2/healthz'

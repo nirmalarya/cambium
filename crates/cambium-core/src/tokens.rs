@@ -87,7 +87,10 @@ impl Engine {
     }
     /// Revoke every token of `user`; returns how many.
     pub fn revoke_tokens(&self, user: &str) -> Result<u64> {
-        self.db.exec("UPDATE tokens SET revoked=1 WHERE user_name=?1 AND revoked=0", p![user])
+        let n = self.db.exec("UPDATE tokens SET revoked=1 WHERE user_name=?1 AND revoked=0", p![user])?;
+        // UI sessions end with the user's access, whatever they signed in with
+        self.db.exec("DELETE FROM ui_sessions WHERE user_name=?1", p![user])?;
+        Ok(n)
     }
     /// Token metadata (never the secrets).
     pub fn list_tokens(&self) -> Result<Vec<Value>> {
@@ -101,20 +104,31 @@ impl Engine {
     }
 
     // ---------- UI sessions ----------
-    pub fn create_session(&self, who: &Principal, ttl: i64) -> Result<String> {
-        let id = random("bvs_");
+    /// Start a UI session for `who`, signed in with `token`. A static token is linked
+    /// (revoking or expiring it ends the session); any other credential's session
+    /// lasts at most until `not_after` (e.g. the JWT's `exp`).
+    pub fn create_session(&self, who: &Principal, ttl: i64, token: &str, not_after: Option<i64>) -> Result<String> {
+        let id = random("cmbs_");
         let t = now();
         self.db.exec("DELETE FROM ui_sessions WHERE expires_at<=?1", p![t])?;
+        let linked = token.starts_with("cmbt_").then(|| hash_bytes(token.as_bytes()));
+        let exp = not_after.map_or(t + ttl, |n| n.min(t + ttl));
         self.db.exec(
-            "INSERT INTO ui_sessions(id_hash,user_name,groups,created_at,expires_at) VALUES(?1,?2,?3,?4,?5)",
-            p![hash_bytes(id.as_bytes()), &who.user, who.groups.join(","), t, t + ttl],
+            "INSERT INTO ui_sessions(id_hash,user_name,groups,created_at,expires_at,token_hash) VALUES(?1,?2,?3,?4,?5,?6)",
+            p![hash_bytes(id.as_bytes()), &who.user, who.groups.join(","), t, exp, linked],
         )?;
         Ok(id)
     }
     pub fn session_principal(&self, id: &str) -> Result<Principal> {
+        let t = now();
         let r = self
             .db
-            .one("SELECT user_name,groups FROM ui_sessions WHERE id_hash=?1 AND expires_at>?2", p![hash_bytes(id.as_bytes()), now()])?
+            .one(
+                "SELECT s.user_name,s.groups FROM ui_sessions s LEFT JOIN tokens k ON k.token_hash=s.token_hash \
+                 WHERE s.id_hash=?1 AND s.expires_at>?2 \
+                 AND (s.token_hash IS NULL OR (k.revoked=0 AND (k.expires_at IS NULL OR k.expires_at>?2)))",
+                p![hash_bytes(id.as_bytes()), t],
+            )?
             .ok_or(Error::Unauthorized)?;
         Ok(Principal { user: r.s(0), groups: groups_of(&r.s(1)) })
     }

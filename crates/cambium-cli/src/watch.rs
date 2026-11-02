@@ -18,8 +18,17 @@ fn meta_file(root: &Path, f: &str) -> std::path::PathBuf {
     crate::meta(root).join(f)
 }
 
+/// Is process `pid` running? `kill(pid, 0)` works on Linux and macOS; EPERM means
+/// it exists but belongs to someone else.
+#[cfg(unix)]
 fn alive(pid: u32) -> bool {
-    Path::new(&format!("/proc/{pid}")).exists()
+    let Ok(pid) = i32::try_from(pid) else { return false };
+    // SAFETY: signal 0 only checks for existence and permission; nothing is sent
+    unsafe { libc::kill(pid, 0) == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) }
+}
+#[cfg(not(unix))]
+fn alive(_pid: u32) -> bool {
+    false
 }
 
 /// Paths to examine instead of a full walk, if a live watcher has a baseline.

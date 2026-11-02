@@ -93,15 +93,36 @@ fn token_expiry_rotation_revocation() {
 #[test]
 fn sessions_are_server_side_and_end() {
     let (e, _d) = eng();
-    let s = e.create_session(&who("alice", &["g"]), 3600).unwrap();
-    assert!(s.starts_with("bvs_"));
+    let s = e.create_session(&who("alice", &["g"]), 3600, "jwt-or-other", None).unwrap();
+    assert!(s.starts_with("cmbs_"));
     assert_eq!(e.session_principal(&s).unwrap().groups, vec!["g".to_string()]);
     assert!(e.verify_principal(&s).is_err(), "a session id is not an API token");
     e.end_session(&s).unwrap();
     assert!(e.session_principal(&s).is_err());
-    let s2 = e.create_session(&who("bob", &[]), 1).unwrap();
+    let s2 = e.create_session(&who("bob", &[]), 1, "jwt-or-other", None).unwrap();
     std::thread::sleep(std::time::Duration::from_millis(2100));
     assert!(e.session_principal(&s2).is_err(), "session expires");
+}
+
+#[test]
+fn sessions_end_when_access_is_revoked() {
+    let (e, _d) = eng();
+    // linked to a static token: revoking the token ends the session
+    let tok = e.create_token("carol").unwrap();
+    let p = e.verify_principal(&tok).unwrap();
+    let s = e.create_session(&p, 3600, &tok, None).unwrap();
+    assert!(e.session_principal(&s).is_ok());
+    e.revoke_tokens("carol").unwrap();
+    assert!(e.session_principal(&s).is_err(), "revoked token ends its session");
+    // a JWT session is capped at the JWT's exp
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    let j = e.create_session(&who("dave", &[]), 3600, "a.b.c", Some(now - 1)).unwrap();
+    assert!(e.session_principal(&j).is_err(), "session cannot outlive the JWT");
+    // revoking a user ends their sessions even without a linked token
+    let j2 = e.create_session(&who("dave", &[]), 3600, "a.b.c", None).unwrap();
+    assert!(e.session_principal(&j2).is_ok());
+    e.revoke_tokens("dave").unwrap();
+    assert!(e.session_principal(&j2).is_err());
 }
 
 fn owners_repo() -> (Engine, tempfile::TempDir, String) {
