@@ -364,6 +364,11 @@ async fn home(State(st): State<St>, h: HeaderMap) -> Response {
             esc(&r)
         ));
     }
+    if rows.is_empty() {
+        rows = "<tr><td colspan=3 class=muted>No repositories yet. Create one below, or from a terminal with <code>cmb init &lt;name&gt;</code>; \
+                an existing git repository can be imported with <code>cmbd import-git</code>.</td></tr>"
+            .into();
+    }
     page(
         "Repositories",
         Some(&u.user),
