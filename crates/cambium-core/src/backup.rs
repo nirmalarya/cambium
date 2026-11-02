@@ -70,7 +70,8 @@ impl Engine {
         let d = dir.to_path_buf();
         let pg = self.db.is_pg();
         // one snapshot for every table, so the copy is consistent while writers continue
-        let (tables, version) = self.db.tx(move |c| {
+        // (on SQLite this runs on its own read-only connection and does not block requests)
+        let (tables, version) = self.db.snapshot_tx(move |c| {
             if pg {
                 c.batch("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")?;
             }

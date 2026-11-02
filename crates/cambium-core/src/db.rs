@@ -372,6 +372,27 @@ impl Db {
             }),
         }
     }
+    /// A long read-only transaction over a consistent snapshot that does not block
+    /// other requests. SQLite: a separate read-only connection (WAL mode lets it read
+    /// a snapshot while writers continue). Postgres: one pool connection.
+    pub fn snapshot_tx<R: Send + 'static>(&self, f: impl FnOnce(&mut dyn Conn) -> Result<R> + Send + 'static) -> Result<R> {
+        match self {
+            Db::Sqlite(m) => {
+                let path = m.lock().unwrap().path().filter(|p| !p.is_empty()).map(String::from);
+                let Some(path) = path else { return self.tx(f) }; // in-memory: no second connection
+                let mut c = rusqlite::Connection::open_with_flags(
+                    &path,
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                )?;
+                c.busy_timeout(std::time::Duration::from_secs(5))?;
+                let mut t = c.transaction()?;
+                let r = f(&mut t)?;
+                t.commit()?;
+                Ok(r)
+            }
+            Db::Pg { .. } => self.tx(f),
+        }
+    }
     fn pg<R: Send + 'static>(&self, f: impl FnOnce(&mut postgres::Client) -> Result<R> + Send + 'static) -> Result<R> {
         let Db::Pg { queue, stats } = self else { unreachable!() };
         let (rtx, rrx) = mpsc::channel();
@@ -398,5 +419,31 @@ impl Db {
     }
     pub fn is_pg(&self) -> bool {
         matches!(self, Db::Pg { .. })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    /// A snapshot read does not hold the main connection: writes proceed during it
+    /// (the old shared-transaction backup would deadlock here) and stay invisible
+    /// to the snapshot.
+    #[test]
+    fn snapshot_tx_does_not_block_writers() {
+        let d = tempfile::tempdir().unwrap();
+        let c = rusqlite::Connection::open(d.path().join("s.db")).unwrap();
+        c.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE t(x INTEGER); INSERT INTO t VALUES(1);").unwrap();
+        let db = std::sync::Arc::new(Db::Sqlite(Mutex::new(c)));
+        let w = db.clone();
+        let seen = db
+            .snapshot_tx(move |s| {
+                let before = s.query("SELECT count(*) FROM t", &[])?[0].i(0);
+                w.exec("INSERT INTO t VALUES(2)", vec![])?; // main connection, during the snapshot
+                let after = s.query("SELECT count(*) FROM t", &[])?[0].i(0);
+                Ok((before, after))
+            })
+            .unwrap();
+        assert_eq!(seen, (1, 1), "snapshot is stable");
+        assert_eq!(db.one("SELECT count(*) FROM t", vec![]).unwrap().unwrap().i(0), 2);
     }
 }
