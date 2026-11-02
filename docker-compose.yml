@@ -44,6 +44,7 @@ services:
       CAMBIUM_S3_ACCESS_KEY: "${RUSTFS_ACCESS_KEY}"
       CAMBIUM_S3_SECRET_KEY: "${RUSTFS_SECRET_KEY}"
       CAMBIUM_RATE: "${CAMBIUM_RATE:-50}"
+      CAMBIUM_PG_POOL: "${CAMBIUM_PG_POOL:-16}"
       CAMBIUM_BURST: "${CAMBIUM_BURST:-200}"
       # Single sign-on (OIDC). Leave CAMBIUM_OIDC_ISSUER empty to use static tokens only.
       CAMBIUM_OIDC_ISSUER: "${CAMBIUM_OIDC_ISSUER:-}"

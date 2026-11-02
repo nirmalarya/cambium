@@ -57,6 +57,7 @@ impl IntoResponse for ApiErr {
             Error::Bad(_) => (StatusCode::BAD_REQUEST, "bad_request"),
             Error::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
             Error::Forbidden(_) => (StatusCode::FORBIDDEN, "forbidden"),
+            Error::Busy(_) => (StatusCode::CONFLICT, "busy"),
             _ => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         };
         // storage and I/O details stay in the server log, not in the response
@@ -72,6 +73,10 @@ impl IntoResponse for ApiErr {
         }
         if let Error::RefMoved { found, .. } = &self.0 {
             body["found"] = json!(found);
+        }
+        if matches!(self.0, Error::Busy(_)) {
+            // transient: clients (cmb included) retry automatically
+            return (code, [("retry-after", "1")], Json(body)).into_response();
         }
         (code, Json(body)).into_response()
     }
@@ -373,13 +378,17 @@ async fn get_tree(
 ) -> Result<Response, ApiErr> {
     let u = user(&st, &h)?;
     let az = st.authz(&r, &u)?;
-    let dir = q.path.trim_matches('/').to_string();
-    // same answer for "absent" and "not yours"
-    let nf = || ApiErr(Error::NotFound(format!("tree {id}")));
-    if !(dir.is_empty() || cambium_core::engine::valid_path(&dir)) || !az.can_see_dir(&dir) || !st.tree_at(&r, &id, &dir)? {
-        return Err(nf());
+    let Some(v) = serve_tree(&st, &az, &r, &id, &q.path)? else { return Err(ApiErr(Error::NotFound(format!("tree {id}")))) };
+    let complete = v["complete"] == true;
+    Ok(([("cache-control", if complete { "private, max-age=31536000, immutable" } else { "private, no-store" })], Json(v)).into_response())
+}
+/// One tree for this caller, or None ("absent" and "not yours" look the same).
+fn serve_tree(st: &St, az: &cambium_core::Authz, r: &str, id: &str, path: &str) -> Result<Option<Value>, ApiErr> {
+    let dir = path.trim_matches('/').to_string();
+    if !(dir.is_empty() || cambium_core::engine::valid_path(&dir)) || !az.can_see_dir(&dir) || !st.tree_at(r, id, &dir)? {
+        return Ok(None);
     }
-    let t = st.get_tree(&id)?;
+    let t = st.get_tree(id)?;
     let n = t.entries.len();
     let entries: Vec<_> = t
         .entries
@@ -394,8 +403,33 @@ async fn get_tree(
         })
         .collect();
     let complete = entries.len() == n;
-    let body = Json(json!({"id": id, "path": dir, "complete": complete, "entries": entries}));
-    Ok(([("cache-control", if complete { "private, max-age=31536000, immutable" } else { "private, no-store" })], body).into_response())
+    Ok(Some(json!({"id": id, "path": dir, "complete": complete, "entries": entries})))
+}
+#[derive(Deserialize)]
+struct TreeItem {
+    id: String,
+    #[serde(default)]
+    path: String,
+}
+#[derive(Deserialize)]
+struct TreeBatch {
+    items: Vec<TreeItem>,
+}
+/// Many trees in one request (one directory level of a walk), each checked exactly like
+/// a single tree fetch. Missing or hidden ones come back as {"id","path","error":"not_found"}.
+async fn get_trees(State(st): State<St>, h: HeaderMap, Path(r): Path<String>, Json(b): Json<TreeBatch>) -> R {
+    let u = user(&st, &h)?;
+    let az = st.authz(&r, &u)?;
+    if b.items.len() > 2000 {
+        return Err(ApiErr(Error::Bad("at most 2000 trees per request".into())));
+    }
+    let mut out = Vec::with_capacity(b.items.len());
+    for it in &b.items {
+        out.push(
+            serve_tree(&st, &az, &r, &it.id, &it.path)?.unwrap_or_else(|| json!({"id": it.id, "path": it.path, "error": "not_found"})),
+        );
+    }
+    Ok(Json(json!({"trees": out})))
 }
 #[derive(Deserialize)]
 struct BisectQ {
@@ -698,6 +732,7 @@ pub fn app(st: St, lim: Arc<RateLimiter>) -> Router {
         .route("/v1/repos/:r/changesets", post(create_changeset))
         .route("/v1/repos/:r/root/*rev", get(root))
         .route("/v1/repos/:r/trees/:id", get(get_tree))
+        .route("/v1/repos/:r/trees", post(get_trees))
         .route("/v1/repos/:r/land", post(land))
         .route("/v1/repos/:r/bisect", get(bisect))
         .route("/v1/repos/:r/revert", post(revert))

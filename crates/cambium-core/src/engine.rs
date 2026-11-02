@@ -50,6 +50,9 @@ pub enum Error {
     Unauthorized,
     #[error("forbidden: {0}")]
     Forbidden(String),
+    /// Transient contention (e.g. a ref kept moving during landing): retry shortly.
+    #[error("busy: {0}")]
+    Busy(String),
     #[error("storage: {0}")]
     Db(String),
     #[error("io: {0}")]
@@ -188,6 +191,13 @@ impl Authz {
 
 pub const SCHEMA: &str = include_str!("../../../docs/schema.sql");
 
+/// Outcome of merging one path.
+pub(crate) enum EntryMerge {
+    Keep,
+    Take(Option<String>),
+    Conflict,
+}
+
 enum Step {
     Go,
     Prune,
@@ -288,7 +298,7 @@ impl Engine {
     }
     /// Postgres at `url` (`postgres://...`): several cmbd nodes may share it.
     pub fn open_pg(url: &str, blobs: Arc<dyn BlobStore>) -> Result<Self> {
-        let pool = std::env::var("CAMBIUM_PG_POOL").ok().and_then(|v| v.parse().ok()).unwrap_or(4);
+        let pool = std::env::var("CAMBIUM_PG_POOL").ok().and_then(|v| v.parse().ok()).unwrap_or(16);
         Ok(Self { db: Db::open_pg(url, pool)?, blobs, manifests: Default::default() })
     }
     /// Fill generation numbers and the path history index for changesets written
@@ -447,20 +457,8 @@ impl Engine {
             return Err(Error::Bad("a changeset has at most two parents".into()));
         }
         if files.iter().any(|f| f.blob.is_some()) {
-            let mut m = match parents.first() {
-                Some(p1) => self.manifest(repo, p1)?,
-                None => Manifest::new(),
-            };
-            for f in &files {
-                match &f.blob {
-                    Some(b) => m.insert(f.path.clone(), b.clone()),
-                    None => m.remove(&f.path),
-                };
-            }
-            for f in files.iter().filter(|f| f.blob.is_some()) {
-                if let Some(c) = file_dir_conflict(&m, &f.path) {
-                    return Err(Error::Bad(format!("{} conflicts with {c}: a path cannot be both a file and a directory", f.path)));
-                }
+            if let Some(c) = self.file_dir_conflict_in(repo, parents.first(), &files)? {
+                return Err(Error::Bad(c));
             }
         }
         let mut gen = 1;
@@ -945,71 +943,68 @@ impl Engine {
         paths.sort();
         paths.dedup();
         for p in paths {
-            let (b, o, t) = (base.get(p), ours.get(p), theirs.get(p));
-            if o == t || t == b {
-                continue;
-            }
-            if o == b {
-                match t {
-                    Some(x) => {
-                        out.insert(p.clone(), x.clone());
-                    }
-                    None => {
-                        out.remove(p);
-                    }
+            match self.merge_entry(base.get(p), ours.get(p), theirs.get(p))? {
+                EntryMerge::Keep => {}
+                EntryMerge::Take(Some(x)) => {
+                    out.insert(p.clone(), x);
                 }
-                continue;
-            }
-            match (b, o, t) {
-                (_, Some(o), Some(t)) => {
-                    let (bb, bm) = b.map(|e| split_entry(e)).map_or((None, None), |(x, m)| (Some(x), Some(m)));
-                    let ((ob, om), (tb, tm)) = (split_entry(o), split_entry(t));
-                    // mode: take whichever side changed it; both changed differently = conflict
-                    let mode = if om == tm {
-                        om
-                    } else if Some(om) == bm {
-                        tm
-                    } else if Some(tm) == bm {
-                        om
-                    } else {
-                        conflicts.push(p.clone());
-                        continue;
-                    };
-                    let blob = if ob == tb {
-                        ob.to_string()
-                    } else if Some(ob) == bb {
-                        tb.to_string()
-                    } else if Some(tb) == bb {
-                        ob.to_string()
-                    } else {
-                        // line merge only for real text: binary files, symlinks and huge
-                        // files are conflicts, never lossily merged
-                        let texts = if mode == MODE_LINK || om == MODE_LINK || tm == MODE_LINK {
-                            None
-                        } else {
-                            let bt = match bb {
-                                Some(b) => self.mergeable_text(b)?,
-                                None => Some(String::new()),
-                            };
-                            match (bt, self.mergeable_text(ob)?, self.mergeable_text(tb)?) {
-                                (Some(b), Some(o), Some(t)) => Some((b, o, t)),
-                                _ => None,
-                            }
-                        };
-                        match texts.map(|(b, o, t)| text::merge3(&b, &o, &t)) {
-                            Some(Ok(m)) => self.blobs.put(m.as_bytes())?,
-                            _ => {
-                                conflicts.push(p.clone());
-                                continue;
-                            }
-                        }
-                    };
-                    out.insert(p.clone(), entry(&blob, mode));
+                EntryMerge::Take(None) => {
+                    out.remove(p);
                 }
-                _ => conflicts.push(p.clone()),
+                EntryMerge::Conflict => conflicts.push(p.clone()),
             }
         }
         Ok(if conflicts.is_empty() { Ok(out) } else { Err(conflicts) })
+    }
+    /// Three-way merge of one path's entry (blob + mode): keep ours, take a new value
+    /// (None = delete), or conflict. Text files are line-merged; binaries, symlinks
+    /// and huge files never are.
+    pub(crate) fn merge_entry(&self, b: Option<&String>, o: Option<&String>, t: Option<&String>) -> Result<EntryMerge> {
+        if o == t || t == b {
+            return Ok(EntryMerge::Keep);
+        }
+        if o == b {
+            return Ok(EntryMerge::Take(t.cloned()));
+        }
+        let (Some(o), Some(t)) = (o, t) else { return Ok(EntryMerge::Conflict) };
+        let (bb, bm) = b.map(|e| split_entry(e)).map_or((None, None), |(x, m)| (Some(x), Some(m)));
+        let ((ob, om), (tb, tm)) = (split_entry(o), split_entry(t));
+        // mode: take whichever side changed it; both changed differently = conflict
+        let mode = if om == tm {
+            om
+        } else if Some(om) == bm {
+            tm
+        } else if Some(tm) == bm {
+            om
+        } else {
+            return Ok(EntryMerge::Conflict);
+        };
+        let blob = if ob == tb {
+            ob.to_string()
+        } else if Some(ob) == bb {
+            tb.to_string()
+        } else if Some(tb) == bb {
+            ob.to_string()
+        } else {
+            let texts = if mode == MODE_LINK || om == MODE_LINK || tm == MODE_LINK {
+                None
+            } else {
+                let bt = match bb {
+                    Some(b) => self.mergeable_text(b)?,
+                    None => Some(String::new()),
+                };
+                match (bt, self.mergeable_text(ob)?, self.mergeable_text(tb)?) {
+                    (Some(b), Some(o), Some(t)) => Some((b, o, t)),
+                    _ => None,
+                }
+            };
+            match texts.map(|(b, o, t)| text::merge3(&b, &o, &t)) {
+                Some(Ok(m)) => self.blobs.put(m.as_bytes())?,
+                _ => return Ok(EntryMerge::Conflict),
+            }
+        };
+        let e = entry(&blob, mode);
+        Ok(if &e == o { EntryMerge::Keep } else { EntryMerge::Take(Some(e)) })
     }
 
     pub fn changes_between(a: &Manifest, b: &Manifest) -> Vec<FileChange> {
@@ -1130,11 +1125,13 @@ impl Engine {
         }
         let mut tip = onto.to_string();
         for ch in todo.iter().rev() {
-            let mp = self.manifest(repo, &ch.parents[0])?;
-            let mc = self.manifest(repo, &ch.id)?;
-            let mt = self.manifest(repo, &tip)?;
-            let merged = self.merge_manifests(&mp, &mt, &mc)?.map_err(Error::Conflict)?;
-            let files = Self::changes_between(&mt, &merged);
+            // merge on trees: only directories that differ between the three are visited
+            let (rp, rc, rt) = (self.root_tree(repo, &ch.parents[0])?, self.root_tree(repo, &ch.id)?, self.root_tree(repo, &tip)?);
+            let (mut files, mut conflicts) = (vec![], vec![]);
+            self.merge_tree_changes(Some(&rp), Some(&rt), Some(&rc), "", &mut files, &mut conflicts)?;
+            if !conflicts.is_empty() {
+                return Err(Error::Conflict(conflicts));
+            }
             if files.is_empty() {
                 continue; // already applied upstream (e.g. landed before): drop it
             }
@@ -1148,7 +1145,12 @@ impl Engine {
     /// Lock-free, no merge queue. Returns the new head.
     pub fn land(&self, repo: &str, cs: &str, target: &str, check: &dyn Fn(&[FileChange]) -> Result<()>) -> Result<String> {
         let cs = self.resolve(repo, cs)?;
-        for _ in 0..16 {
+        for attempt in 0..64u64 {
+            if attempt > 0 {
+                // others landed first: back off a little (jittered) so the race resolves
+                let jitter = u64::from(std::process::id()).wrapping_mul(attempt).wrapping_add(cs.len() as u64) % 20;
+                std::thread::sleep(std::time::Duration::from_millis(attempt.min(10) * 5 + jitter));
+            }
             let head = self.get_ref(repo, target)?.ok_or_else(|| Error::NotFound(format!("ref {target}")))?;
             let tip = self.rebase_onto(repo, &cs, &head, check)?;
             if tip == head {
@@ -1160,7 +1162,7 @@ impl Engine {
                 Err(e) => return Err(e),
             }
         }
-        Err(Error::Bad(format!("{target} kept moving; try again")))
+        Err(Error::Busy(format!("{target} kept moving; retry")))
     }
 
     pub fn wal_len(&self, repo: &str) -> Result<i64> {

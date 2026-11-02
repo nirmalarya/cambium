@@ -70,8 +70,10 @@ impl Sim {
         let content = format!("op {}\n", self.n);
         // work is often based on a stale head (another actor landed meanwhile)
         let base = if self.rng.chance(40) && self.all.len() > 3 {
-            let back = self.e.log("r", &self.main, None, 4).unwrap();
-            back[self.rng.below(back.len())].id.clone()
+            // recent heads of main, never the empty root changeset (before shared.txt)
+            let back: Vec<String> =
+                self.e.log("r", &self.main, None, 4).unwrap().into_iter().map(|c| c.id).filter(|id| *id != self.all[0]).collect();
+            back[self.rng.below(back.len())].clone()
         } else {
             self.main.clone()
         };

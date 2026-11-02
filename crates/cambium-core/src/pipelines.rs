@@ -85,6 +85,6 @@ impl Engine {
                 Err(e) => return Err(e),
             }
         }
-        Err(Error::Bad(format!("{target} kept moving; try again")))
+        Err(Error::Busy(format!("{target} kept moving; retry")))
     }
 }

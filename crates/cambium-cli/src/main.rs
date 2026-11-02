@@ -305,7 +305,10 @@ fn cache_get(id: &str) -> Option<Vec<u8>> {
     }
     // LRU: a hit refreshes the entry, so eviction drops what has not been used longest
     let _ = std::fs::File::options().write(true).open(&p).and_then(|f| f.set_modified(std::time::SystemTime::now()));
-    CACHE_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // a blob prefetched by this run was already counted as a server fetch
+    if !PREFETCHED.lock().unwrap().contains(id) {
+        CACHE_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
     Some(d)
 }
 /// Create a new temp file in `dir` that cannot be a pre-planted file or symlink:
@@ -322,6 +325,30 @@ fn new_temp(dir: &Path, mode: u32) -> Option<(PathBuf, std::fs::File)> {
     #[cfg(not(unix))]
     let _ = mode;
     o.open(&p).ok().map(|f| (p, f))
+}
+/// Is a verified copy of `id` in the cache? (No hit counting.)
+fn cache_get_quiet(id: &str) -> Option<()> {
+    let p = cache_dir().join(id);
+    std::fs::symlink_metadata(&p).ok().filter(|m| m.file_type().is_file()).map(|_| ())
+}
+static PREFETCHED: std::sync::Mutex<std::collections::BTreeSet<String>> = std::sync::Mutex::new(std::collections::BTreeSet::new());
+/// Fetch blobs into the cache with CAMBIUM_FETCH_PARALLEL workers (default 8).
+fn prefetch(c: &Client, ids: &[&str]) {
+    let n: usize = std::env::var("CAMBIUM_FETCH_PARALLEL").ok().and_then(|v| v.parse().ok()).unwrap_or(8).clamp(1, 64);
+    if ids.len() < 2 || n == 1 {
+        return;
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|sc| {
+        for _ in 0..n.min(ids.len()) {
+            sc.spawn(|| loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(id) = ids.get(i) else { break };
+                let _ = c.get_blob(id);
+                PREFETCHED.lock().unwrap().insert(id.to_string());
+            });
+        }
+    });
 }
 fn cache_put(id: &str, data: &[u8]) {
     let d = cache_dir();
@@ -612,44 +639,61 @@ fn fetch_tree_sized(c: &Client, s: &State, target: &str) -> Fetched {
             })
     };
     let (mut files, mut trees) = (BTreeMap::new(), BTreeMap::new());
-    let mut todo = vec![(String::new(), root)];
-    while let Some((dir, id)) = todo.pop() {
-        if reuse && s.trees.get(&dir) == Some(&id) {
-            // unchanged directory: keep what is laid out under it
-            TREES_REUSED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let under = |p: &String| dir.is_empty() || p.starts_with(&format!("{dir}/"));
-            files.extend(s.files.iter().filter(|(p, _)| under(p)).map(|(p, e)| (p.clone(), e.clone())));
-            trees.extend(s.trees.iter().filter(|(p, _)| *p == &dir || under(p)).map(|(p, t)| (p.clone(), t.clone())));
-            continue;
+    // one request per directory level: reused directories cost nothing, the rest of a
+    // level is fetched as a batch
+    let mut level = vec![(String::new(), root)];
+    while !level.is_empty() {
+        let mut want = vec![];
+        for (dir, id) in level.drain(..) {
+            if reuse && s.trees.get(&dir) == Some(&id) {
+                // unchanged directory: keep what is laid out under it
+                TREES_REUSED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let under = |p: &String| dir.is_empty() || p.starts_with(&format!("{dir}/"));
+                files.extend(s.files.iter().filter(|(p, _)| under(p)).map(|(p, e)| (p.clone(), e.clone())));
+                trees.extend(s.trees.iter().filter(|(p, _)| *p == &dir || under(p)).map(|(p, t)| (p.clone(), t.clone())));
+            } else {
+                want.push((dir, id));
+            }
         }
-        TREES_FETCHED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let t = c.get(&format!("/v1/repos/{}/trees/{id}?path={dir}", s.repo), &[]);
-        if t["complete"] == true {
-            trees.insert(dir.clone(), id);
-        }
-        for e in t["entries"].as_array().unwrap() {
-            let name = e["name"].as_str().unwrap();
-            let p = if dir.is_empty() { name.to_string() } else { format!("{dir}/{name}") };
-            let eid = e["id"].as_str().unwrap().to_string();
-            match e["kind"].as_str().unwrap() {
-                "tree" => {
-                    if in_scope_dir(&p) {
-                        todo.push((p, eid));
-                    }
+        let mut next = vec![];
+        for chunk in want.chunks(1000) {
+            let items: Vec<Value> = chunk.iter().map(|(d, i)| json!({"id": i, "path": d})).collect();
+            let r = c.post(&format!("/v1/repos/{}/trees", s.repo), json!({"items": items}));
+            for t in r["trees"].as_array().unwrap() {
+                TREES_FETCHED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let (dir, id) = (t["path"].as_str().unwrap().to_string(), t["id"].as_str().unwrap().to_string());
+                if t.get("error").is_some() {
+                    continue; // not visible to this caller
                 }
-                k => {
-                    if in_sparse(s, &p) {
-                        let mode = match k {
-                            "exec" => cambium_core::engine::MODE_EXEC,
-                            "link" => MODE_LINK,
-                            _ => MODE_FILE,
-                        };
-                        sizes.insert(p.clone(), e["size"].as_u64().unwrap_or(0));
-                        files.insert(p, entry(&eid, mode));
+                if t["complete"] == true {
+                    trees.insert(dir.clone(), id);
+                }
+                for e in t["entries"].as_array().unwrap() {
+                    let name = e["name"].as_str().unwrap();
+                    let p = if dir.is_empty() { name.to_string() } else { format!("{dir}/{name}") };
+                    let eid = e["id"].as_str().unwrap().to_string();
+                    match e["kind"].as_str().unwrap() {
+                        "tree" => {
+                            if in_scope_dir(&p) {
+                                next.push((p, eid));
+                            }
+                        }
+                        k => {
+                            if in_sparse(s, &p) {
+                                let mode = match k {
+                                    "exec" => cambium_core::engine::MODE_EXEC,
+                                    "link" => MODE_LINK,
+                                    _ => MODE_FILE,
+                                };
+                                sizes.insert(p.clone(), e["size"].as_u64().unwrap_or(0));
+                                files.insert(p, entry(&eid, mode));
+                            }
+                        }
                     }
                 }
             }
         }
+        level = next;
     }
     (cs, files, trees, sizes)
 }
@@ -673,6 +717,17 @@ fn materialise(c: &Client, root: &Path, s: &mut State, target: &str) {
             removed += 1;
         }
     }
+    // fetch the blobs this layout needs in parallel (immutable, independent objects),
+    // then lay files out from the local cache
+    let mut need: Vec<&str> = entries
+        .iter()
+        .filter(|(p, b)| s.files.get(*p) != Some(*b) && !local.contains_key(*p))
+        .map(|(_, b)| split_entry(b).0)
+        .filter(|id| cache_get_quiet(id).is_none())
+        .collect();
+    need.sort();
+    need.dedup();
+    prefetch(c, &need);
     for (p, b) in &entries {
         if s.files.get(p) == Some(b) {
             continue;

@@ -55,6 +55,22 @@ impl Edge {
         }
     }
 }
+/// `/v1/repos/<repo>/trees` (batched tree fetch)
+fn tree_batch_req(path_q: &str) -> Option<String> {
+    let path = path_q.split('?').next()?;
+    let repo = path.strip_prefix("/v1/repos/")?.strip_suffix("/trees")?;
+    (!repo.is_empty() && !repo.contains('/')).then(|| repo.to_string())
+}
+/// Cache a complete tree whose content matches its id.
+fn keep_tree(file: &std::path::Path, id: &str, v: &serde_json::Value, body: &[u8]) {
+    let entries = serde_json::from_value::<Vec<cambium_core::tree::TreeEntry>>(v["entries"].clone());
+    if v["complete"] == true && entries.is_ok_and(|en| cambium_core::tree::Tree { entries: en }.id() == id) {
+        let tmp = file.with_extension(format!("tmp-{}", std::process::id()));
+        if std::fs::write(&tmp, body).is_ok() {
+            let _ = std::fs::rename(&tmp, file);
+        }
+    }
+}
 /// `/v1/repos/<repo>/trees/<id>` with `?path=<dir>`
 fn tree_req(path_q: &str) -> Option<(String, String, String)> {
     let (path, q) = path_q.split_once('?').unwrap_or((path_q, ""));
@@ -142,6 +158,67 @@ fn handle(e: &Edge, method: String, path_q: String, h: HeaderMap, body: Bytes) -
     r
 }
 fn handle_inner(e: &Edge, method: String, path_q: String, h: HeaderMap, body: Bytes) -> Response {
+    if method == "POST" {
+        if let Some(repo) = tree_batch_req(&path_q) {
+            if let Some(r) = tree_batch(e, &repo, &path_q, &h, &body) {
+                return r;
+            }
+        }
+    }
+    handle_get(e, method, path_q, h, body)
+}
+/// Batched tree fetch through a tier: answer what is cached (for callers the upstream
+/// recently allowed), forward only the misses upstream, cache what comes back.
+fn tree_batch(e: &Edge, repo: &str, path_q: &str, h: &HeaderMap, body: &[u8]) -> Option<Response> {
+    let req: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let items = req["items"].as_array()?.clone();
+    let key = |it: &serde_json::Value| -> Option<(String, String, String, std::path::PathBuf)> {
+        let (id, dir) = (it["id"].as_str()?.to_string(), it["path"].as_str().unwrap_or("").to_string());
+        let object = format!("tree\n{repo}\n{id}\n{dir}");
+        let file = e.trees.join(cambium_core::blob::hash_bytes(object.as_bytes()));
+        Some((id, dir, object, file))
+    };
+    let mut out: Vec<Option<serde_json::Value>> = vec![None; items.len()];
+    let mut misses = vec![];
+    for (i, it) in items.iter().enumerate() {
+        let (_, _, object, file) = key(it)?;
+        let cached = e.allowed(h, &object).then(|| std::fs::read(&file).ok()).flatten();
+        match cached.and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok()) {
+            Some(v) => out[i] = Some(v),
+            None => misses.push(i),
+        }
+    }
+    let tag = if misses.is_empty() {
+        "hit"
+    } else if misses.len() == items.len() {
+        "miss"
+    } else {
+        "partial"
+    };
+    if !misses.is_empty() {
+        let fwd = serde_json::json!({"items": misses.iter().map(|i| items[*i].clone()).collect::<Vec<_>>()});
+        let x = match upstream_call(e, "POST", path_q, h, None, fwd.to_string().as_bytes()) {
+            Ok(x) => x,
+            Err(m) => return Some((StatusCode::BAD_GATEWAY, m).into_response()),
+        };
+        if x.status() != 200 {
+            return Some(to_response(x, Some("miss")));
+        }
+        let v: serde_json::Value = serde_json::from_reader(x.into_reader()).ok()?;
+        let trees = v["trees"].as_array()?;
+        for (slot, t) in misses.iter().zip(trees) {
+            if t.get("error").is_none() {
+                let (id, _, object, file) = key(&items[*slot])?;
+                e.remember(h, &object);
+                keep_tree(&file, &id, t, t.to_string().as_bytes());
+            }
+            out[*slot] = Some(t.clone());
+        }
+    }
+    let body = serde_json::json!({"trees": out.into_iter().map(|t| t.unwrap_or(serde_json::Value::Null)).collect::<Vec<_>>()});
+    Some(([("content-type", "application/json"), ("x-cambium-edge", tag)], body.to_string()).into_response())
+}
+fn handle_get(e: &Edge, method: String, path_q: String, h: HeaderMap, body: Bytes) -> Response {
     let bad = |m: String| (StatusCode::BAD_GATEWAY, m).into_response();
     let path = path_q.split('?').next().unwrap_or("").to_string();
     let range = h.get("range").and_then(|v| v.to_str().ok()).map(String::from);
@@ -202,13 +279,7 @@ fn handle_inner(e: &Edge, method: String, path_q: String, h: HeaderMap, body: By
             e.remember(&h, &object);
             // keep only complete trees whose content matches their id
             if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&body) {
-                let entries = serde_json::from_value::<Vec<cambium_core::tree::TreeEntry>>(v["entries"].clone());
-                if v["complete"] == true && entries.is_ok_and(|en| cambium_core::tree::Tree { entries: en }.id() == id) {
-                    let tmp = file.with_extension(format!("tmp-{}", std::process::id()));
-                    if std::fs::write(&tmp, &body).is_ok() {
-                        let _ = std::fs::rename(&tmp, &file);
-                    }
-                }
+                keep_tree(&file, &id, &v, &body);
             }
             return ([("content-type", "application/json"), ("x-cambium-edge", "miss")], body).into_response();
         }

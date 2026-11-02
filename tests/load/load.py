@@ -127,7 +127,13 @@ def lander(wid):
             note(f"changeset_{s}")
             continue
         tl = time.perf_counter()
-        s, r = cl.req("POST", f"/v1/repos/{a.repo}/land", {"cs": cs["id"], "onto": "main"})
+        for attempt in range(10):
+            s, r = cl.req("POST", f"/v1/repos/{a.repo}/land", {"cs": cs["id"], "onto": "main"})
+            if s == 409 and isinstance(r, dict) and r.get("error") == "busy":
+                note("land_busy_retried")  # what cmb does on 409 + Retry-After
+                time.sleep(0.2 + rnd.random() * 0.3)
+                continue
+            break
         now = time.perf_counter()
         note(f"land_{s}")
         if s == 200:
@@ -147,21 +153,34 @@ def reader(wid):
         if s != 200:
             note(f"root_{s}")
             continue
-        todo, files, ntrees = [("", r["root"])], [], 0
-        while todo:
-            path, tid = todo.pop()
-            s, tr = cl.req("GET", f"/v1/repos/{a.repo}/trees/{tid}?path={path}")
-            ntrees += 1
+        level, files, ntrees, ok = [("", r["root"])], [], 0, True
+        while level and ok:
+            # one request per directory level, like `cmb checkout`
+            s, b = cl.req("POST", f"/v1/repos/{a.repo}/trees", {"items": [{"id": i, "path": p} for p, i in level]})
             if s != 200:
-                note(f"tree_{s}")
+                note(f"trees_{s}")
+                ok = False
                 break
-            for e in tr["entries"]:
-                p = f"{path}/{e['name']}" if path else e["name"]
-                (todo.append((p, e["id"])) if e["kind"] == "tree" else files.append(e["id"]))
-        for bid in rnd.sample(files, min(len(files), a.blobs_per_checkout)):
-            s, _ = cl.req("GET", f"/v1/blobs/{bid}")
-            if s != 200:
-                note(f"blob_{s}")
+            nxt = []
+            for tr in b["trees"]:
+                ntrees += 1
+                for e in tr.get("entries", []):
+                    p = f"{tr['path']}/{e['name']}" if tr["path"] else e["name"]
+                    (nxt.append((p, e["id"])) if e["kind"] == "tree" else files.append(e["id"]))
+            level = nxt
+        # blobs in parallel, like `cmb` (CAMBIUM_FETCH_PARALLEL=8)
+        picks = rnd.sample(files, min(len(files), a.blobs_per_checkout))
+        def fetch(part):
+            bc = Client()
+            for bid in part:
+                s, _ = bc.req("GET", f"/v1/blobs/{bid}")
+                if s != 200:
+                    note(f"blob_{s}")
+        ths = [threading.Thread(target=fetch, args=(picks[k::8],)) for k in range(8)]
+        for th in ths:
+            th.start()
+        for th in ths:
+            th.join()
         with lock:
             checkout_lat.append(time.perf_counter() - t)
             trees_per_checkout.append(ntrees)
@@ -177,7 +196,7 @@ for t in threads:
     t.join()
 elapsed = time.perf_counter() - t1
 lands = len(land_lat)
-errors = {k: v for k, v in statuses.items() if not (k.endswith("_200") or k == "checkout_ok")}
+errors = {k: v for k, v in statuses.items() if not (k.endswith("_200") or k in ("checkout_ok", "land_busy_retried"))}
 print(json.dumps({
     "label": a.label,
     "repo_files": a.files, "repo_dirs": a.dirs,
@@ -193,5 +212,6 @@ print(json.dumps({
     "checkout_ms": {"p50": pct(checkout_lat, 50), "p95": pct(checkout_lat, 95), "p99": pct(checkout_lat, 99)},
     "trees_per_checkout": max(trees_per_checkout) if trees_per_checkout else 0,
     "blobs_per_checkout": a.blobs_per_checkout,
+    "land_busy_retries": statuses.get("land_busy_retried", 0),
     "errors": errors,
 }))

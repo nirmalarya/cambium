@@ -177,6 +177,200 @@ impl Engine {
     }
 }
 
+fn entry_str(e: &TreeEntry) -> String {
+    entry(&e.id, mode_of(&e.kind))
+}
+fn change(path: String, e: &TreeEntry) -> FileChange {
+    FileChange { path, blob: Some(e.id.clone()), mode: mode_of(&e.kind) }
+}
+fn delete(path: String) -> FileChange {
+    FileChange { path, blob: None, mode: MODE_FILE }
+}
+
+impl Engine {
+    fn entries(&self, id: Option<&str>) -> Result<BTreeMap<String, TreeEntry>> {
+        Ok(match id {
+            Some(id) => self.get_tree(id)?.entries.into_iter().map(|e| (e.name.clone(), e)).collect(),
+            None => BTreeMap::new(),
+        })
+    }
+    /// Entry at `path` under root tree `root`, if any (walks the path, not the tree).
+    pub fn lookup(&self, root: &str, path: &str) -> Result<Option<TreeEntry>> {
+        let mut cur = root.to_string();
+        let segs: Vec<&str> = path.split('/').collect();
+        for (i, s) in segs.iter().enumerate() {
+            let Some(e) = self.get_tree(&cur)?.entries.into_iter().find(|e| e.name == *s) else { return Ok(None) };
+            if i + 1 == segs.len() {
+                return Ok(Some(e));
+            }
+            if e.kind != "tree" {
+                return Ok(None);
+            }
+            cur = e.id;
+        }
+        Ok(None)
+    }
+    /// Every file path under tree `id` (at directory `dir`).
+    fn file_paths(&self, id: &str, dir: &str, out: &mut Vec<String>) -> Result<()> {
+        for e in self.get_tree(id)?.entries {
+            let p = join(dir, &e.name);
+            if e.kind == "tree" {
+                self.file_paths(&e.id, &p, out)?;
+            } else {
+                out.push(p);
+            }
+        }
+        Ok(())
+    }
+    fn add_all(&self, id: &str, dir: &str, out: &mut Vec<FileChange>) -> Result<()> {
+        for e in self.get_tree(id)?.entries {
+            let p = join(dir, &e.name);
+            if e.kind == "tree" {
+                self.add_all(&e.id, &p, out)?;
+            } else {
+                out.push(change(p, &e));
+            }
+        }
+        Ok(())
+    }
+    fn delete_all(&self, id: &str, dir: &str, out: &mut Vec<FileChange>) -> Result<()> {
+        let mut ps = vec![];
+        self.file_paths(id, dir, &mut ps)?;
+        out.extend(ps.into_iter().map(delete));
+        Ok(())
+    }
+    /// File changes that turn tree `a` into tree `b`; identical subtrees are skipped.
+    pub fn diff_trees(&self, a: Option<&str>, b: Option<&str>, dir: &str, out: &mut Vec<FileChange>) -> Result<()> {
+        if a == b {
+            return Ok(());
+        }
+        let (ea, eb) = (self.entries(a)?, self.entries(b)?);
+        for name in ea.keys().chain(eb.keys()).collect::<std::collections::BTreeSet<_>>() {
+            let p = join(dir, name);
+            match (ea.get(name), eb.get(name)) {
+                (Some(x), Some(y)) if x == y => {}
+                (Some(x), Some(y)) if x.kind == "tree" && y.kind == "tree" => self.diff_trees(Some(&x.id), Some(&y.id), &p, out)?,
+                (Some(x), y) => {
+                    if x.kind == "tree" {
+                        self.delete_all(&x.id, &p, out)?;
+                    } else if y.is_none_or(|y| y.kind == "tree") {
+                        out.push(delete(p.clone()));
+                    }
+                    match y {
+                        Some(y) if y.kind == "tree" => self.add_all(&y.id, &p, out)?,
+                        Some(y) => out.push(change(p, y)),
+                        None => {}
+                    }
+                }
+                (None, Some(y)) => {
+                    if y.kind == "tree" {
+                        self.add_all(&y.id, &p, out)?;
+                    } else {
+                        out.push(change(p, y));
+                    }
+                }
+                (None, None) => {}
+            }
+        }
+        Ok(())
+    }
+    /// Three-way merge on trees: the file changes that apply `base -> theirs` on top of
+    /// `ours` (conflicting paths go to `conflicts`). Only directories that differ are
+    /// visited, so the cost follows the size of the change, not of the repository.
+    pub fn merge_tree_changes(
+        &self,
+        base: Option<&str>,
+        ours: Option<&str>,
+        theirs: Option<&str>,
+        dir: &str,
+        out: &mut Vec<FileChange>,
+        conflicts: &mut Vec<String>,
+    ) -> Result<()> {
+        if theirs == base || ours == theirs {
+            return Ok(());
+        }
+        if ours == base {
+            return self.diff_trees(ours, theirs, dir, out);
+        }
+        let (eb, eo, et) = (self.entries(base)?, self.entries(ours)?, self.entries(theirs)?);
+        let names: std::collections::BTreeSet<&String> = eb.keys().chain(eo.keys()).chain(et.keys()).collect();
+        for name in names {
+            let p = join(dir, name);
+            let (b, o, t) = (eb.get(name), eo.get(name), et.get(name));
+            let tree = |e: Option<&TreeEntry>| e.is_some_and(|e| e.kind == "tree");
+            let file = |e: Option<&TreeEntry>| e.is_some_and(|e| e.kind != "tree");
+            let id = |e: Option<&TreeEntry>| e.map(|e| e.id.clone());
+            if !file(b) && !file(o) && !file(t) {
+                // directories (or absent) on every side
+                self.merge_tree_changes(id(b).as_deref(), id(o).as_deref(), id(t).as_deref(), &p, out, conflicts)?;
+            } else if !tree(b) && !tree(o) && !tree(t) {
+                // files (or absent) on every side
+                match self.merge_entry(b.map(entry_str).as_ref(), o.map(entry_str).as_ref(), t.map(entry_str).as_ref())? {
+                    crate::engine::EntryMerge::Keep => {}
+                    crate::engine::EntryMerge::Take(Some(e)) => {
+                        let (blob, mode) = split_entry(&e);
+                        out.push(FileChange { path: p, blob: Some(blob.to_string()), mode });
+                    }
+                    crate::engine::EntryMerge::Take(None) => out.push(delete(p)),
+                    crate::engine::EntryMerge::Conflict => conflicts.push(p),
+                }
+            } else if t == b || o == t {
+                // file <-> directory on one side only, the other unchanged
+            } else if o == b {
+                let mut ch = vec![];
+                let wrap = |e: Option<&TreeEntry>| e.map(|e| Tree { entries: vec![TreeEntry { name: name.clone(), ..e.clone() }] });
+                let (ow, tw) = (wrap(o), wrap(t));
+                let (oid, tid) =
+                    (ow.as_ref().map(|x| self.store_tree(x)).transpose()?, tw.as_ref().map(|x| self.store_tree(x)).transpose()?);
+                self.diff_trees(oid.as_deref(), tid.as_deref(), dir, &mut ch)?;
+                out.extend(ch);
+            } else {
+                conflicts.push(p);
+            }
+        }
+        Ok(())
+    }
+    /// Store a tree object without recording a path (temporary single-entry trees).
+    fn store_tree(&self, t: &Tree) -> Result<String> {
+        let id = t.id();
+        self.db.exec("INSERT INTO trees(id,body) VALUES(?1,?2) ON CONFLICT DO NOTHING", p![&id, t.canonical()])?;
+        Ok(id)
+    }
+    /// A changeset may not make a path both a file and a directory (checked against the
+    /// parent's tree by lookups, not by listing the repository).
+    pub(crate) fn file_dir_conflict_in(&self, repo: &str, parent: Option<&String>, files: &[FileChange]) -> Result<Option<String>> {
+        let root = parent.map(|p| self.root_tree(repo, p)).transpose()?;
+        let added: std::collections::HashSet<&str> = files.iter().filter(|f| f.blob.is_some()).map(|f| f.path.as_str()).collect();
+        let deleted: std::collections::HashSet<&str> = files.iter().filter(|f| f.blob.is_none()).map(|f| f.path.as_str()).collect();
+        let msg = |p: &str, c: &str| format!("{p} conflicts with {c}: a path cannot be both a file and a directory");
+        for f in files.iter().filter(|f| f.blob.is_some()) {
+            let mut i = 0;
+            while let Some(j) = f.path[i..].find('/') {
+                let q = &f.path[..i + j];
+                if added.contains(q) {
+                    return Ok(Some(msg(&f.path, q)));
+                }
+                if let Some(r) = &root {
+                    if self.lookup(r, q)?.is_some_and(|e| e.kind != "tree") && !deleted.contains(q) {
+                        return Ok(Some(msg(&f.path, q)));
+                    }
+                }
+                i += j + 1;
+            }
+            if let Some(r) = &root {
+                if let Some(e) = self.lookup(r, &f.path)?.filter(|e| e.kind == "tree") {
+                    let mut ps = vec![];
+                    self.file_paths(&e.id, &f.path, &mut ps)?;
+                    if let Some(left) = ps.into_iter().find(|p| !deleted.contains(p.as_str())) {
+                        return Ok(Some(msg(&f.path, &left)));
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+}
+
 /// Manifest entry back to (blob, kind) — used by the fetch API.
 pub fn kind_of_entry(e: &str) -> (&str, &'static str) {
     let (b, m) = split_entry(e);
