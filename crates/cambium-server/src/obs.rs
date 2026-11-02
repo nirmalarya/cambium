@@ -185,6 +185,18 @@ pub fn audit(st: &St, e: AuditEvent) {
     }
 }
 
+/// The caller's address: the TCP peer, or, when `CAMBIUM_TRUST_PROXY=1` (cmbd sits
+/// behind your own reverse proxy), the rightmost `X-Forwarded-For` entry, which is the
+/// one that proxy added. Client-supplied entries further left are never trusted.
+pub fn client_ip(req: &axum::extract::Request) -> Option<std::net::IpAddr> {
+    let peer = req.extensions().get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|c| c.0.ip());
+    if std::env::var("CAMBIUM_TRUST_PROXY").is_ok_and(|v| v == "1") {
+        let fwd = req.headers().get("x-forwarded-for").and_then(|v| v.to_str().ok()).and_then(|v| v.rsplit(',').next()).and_then(|v| v.trim().parse().ok());
+        return fwd.or(peer);
+    }
+    peer
+}
+
 /// Outermost layer: request id, access log, metrics, security headers, audit.
 pub async fn observe(State(st): State<St>, req: Request, next: Next) -> Response {
     let t0 = Instant::now();
@@ -203,8 +215,7 @@ pub async fn observe(State(st): State<St>, req: Request, next: Next) -> Response
     let method = req.method().to_string();
     let path = req.uri().path().to_string();
     let route = route_of(&path);
-    let client =
-        req.headers().get("x-forwarded-for").and_then(|v| v.to_str().ok()).map(|v| v.split(',').next().unwrap_or("").trim().to_string());
+    let client = client_ip(&req).map(|ip| ip.to_string());
     let ctx = ReqCtx { id: id.clone(), actor: Mutex::new(None) };
     let (mut resp, who) = REQ
         .scope(ctx, async move {

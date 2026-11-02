@@ -31,6 +31,7 @@ config:
   CAMBIUM_PG_POOL: "16"
   CAMBIUM_AUTO_MIGRATE: "0"          # migrations run in the pre-upgrade Job instead
   CAMBIUM_RATE: "50"
+  CAMBIUM_TRUST_PROXY: "1"           # cmbd runs behind the ingress; use the address it appends to X-Forwarded-For
   CAMBIUM_BURST: "200"
   CAMBIUM_MAX_BODY_MB: "64"
   CAMBIUM_REQUEST_TIMEOUT_S: "120"

@@ -241,8 +241,7 @@ async fn limit(State((st, l)): State<(St, Arc<RateLimiter>)>, req: Request, next
     let key = match who {
         Some(p) => format!("user:{}", p.user),
         None => {
-            let ip = req.extensions().get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|c| c.0.ip());
-            ip.map(cambium_core::limits::ip_key).unwrap_or_else(|| "ip:unknown".into())
+            obs::client_ip(&req).map(cambium_core::limits::ip_key).unwrap_or_else(|| "ip:unknown".into())
         }
     };
     match l.check(&key) {
@@ -488,7 +487,8 @@ async fn idempotent(State(st): State<St>, req: Request, next: Next) -> Response 
     let cred =
         req.headers().get("authorization").or_else(|| req.headers().get("cookie")).and_then(|v| v.to_str().ok()).unwrap_or("anonymous");
     let scope = cambium_core::blob::hash_bytes(cred.as_bytes());
-    let k = format!("{}:{}", obs::route_of(req.uri().path()), key);
+    // scoped to the exact path, so a key reused on another repo/ref/review never replays
+    let k = format!("{}:{}", req.uri().path(), key);
     let (parts, body) = req.into_parts();
     let Ok(bytes) = axum::body::to_bytes(body, max_body()).await else {
         return (StatusCode::PAYLOAD_TOO_LARGE, "request body too large").into_response();
@@ -894,6 +894,39 @@ mod tests {
         // log limit is capped
         let r = app.oneshot(get("/v1/repos/r/log?rev=main&limit=1000000000", &alice, None)).await.unwrap();
         assert_eq!(r.status(), 200);
+    }
+
+    #[test]
+    fn client_ip_ignores_forwarded_for_unless_trusted() {
+        let mk = || {
+            let mut r = Req::get("/").header("x-forwarded-for", "6.6.6.6, 10.0.0.9").body(Body::empty()).unwrap();
+            r.extensions_mut().insert(axum::extract::ConnectInfo("192.0.2.1:5000".parse::<std::net::SocketAddr>().unwrap()));
+            r
+        };
+        std::env::remove_var("CAMBIUM_TRUST_PROXY");
+        assert_eq!(obs::client_ip(&mk()).unwrap().to_string(), "192.0.2.1");
+        std::env::set_var("CAMBIUM_TRUST_PROXY", "1");
+        assert_eq!(obs::client_ip(&mk()).unwrap().to_string(), "10.0.0.9", "rightmost entry, added by our proxy");
+        std::env::remove_var("CAMBIUM_TRUST_PROXY");
+    }
+
+    /// An Idempotency-Key replays only on the exact same path, not on another repo.
+    #[tokio::test]
+    async fn idempotency_key_scoped_to_path() {
+        let (app, t, e, _d) = setup(0.0, 1.0);
+        e.create_repo("a", "alice").unwrap();
+        e.create_repo("b", "alice").unwrap();
+        let req = |repo: &str| {
+            Req::post(format!("/v1/repos/{repo}/refs/feat"))
+                .header("authorization", format!("Bearer {t}"))
+                .header("content-type", "application/json")
+                .header("idempotency-key", "k1")
+                .body(Body::from(json!({"expected": null, "new": e.get_ref(repo, "main").unwrap().unwrap()}).to_string()))
+                .unwrap()
+        };
+        assert_eq!(app.clone().oneshot(req("a")).await.unwrap().status(), 200);
+        app.clone().oneshot(req("b")).await.unwrap();
+        assert!(e.get_ref("b", "feat").unwrap().is_some(), "repo b got its own ref, not a replay of repo a");
     }
 
     // ---------- OIDC + per-directory permissions over HTTP ----------

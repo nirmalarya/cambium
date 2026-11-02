@@ -114,6 +114,7 @@ data:
   CAMBIUM_SHUTDOWN_DRAIN_S: "5"
   CAMBIUM_SHUTDOWN_GRACE_S: "25"
   CAMBIUM_TOKEN_TTL: "90d"
+  CAMBIUM_TRUST_PROXY: "1"
 ---
 # Source: cambium/templates/service.yaml
 apiVersion: v1
@@ -161,7 +162,7 @@ spec:
         app.kubernetes.io/name: cambium
         app.kubernetes.io/instance: cambium
       annotations:
-        checksum/config: 986d9f8b6b9e812e5d47b46a10a0e162e12d1e14b480315a07cecdfab13ac296
+        checksum/config: 016af51fd9103d038be34e0557c63a08b90c135e9672518286329cd73cd5b077
     spec:
       serviceAccountName: cambium
       automountServiceAccountToken: false

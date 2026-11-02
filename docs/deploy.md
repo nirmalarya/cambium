@@ -12,6 +12,7 @@ cmbd ──(outbound, internal only)──▶ identity provider JWKS endpoint (s
 ```
 - **Ports:** `docker-compose.yml` binds `127.0.0.1:7878`. The reverse proxy is the only thing that reaches it. There is no public DNS record, no public load balancer and no port-forward.
 - **TLS:** terminates at the internal proxy, using a certificate from the internal CA.
+- **Client addresses:** behind your own reverse proxy, set `CAMBIUM_TRUST_PROXY=1` so the audit log and the per-IP limit for unauthenticated requests use the address your proxy appends to `X-Forwarded-For` (the rightmost entry). Without it, cmbd uses the TCP peer address and ignores `X-Forwarded-For`.
 - **Outbound:** cmbd needs no internet egress. It only calls the identity provider's JWKS URL, which should be an internal or allow-listed endpoint. Alternatively, set `CAMBIUM_OIDC_JWKS_FILE` to a key file that is synced in, and cmbd makes no outbound calls at all.
 
 ## Authentication: single sign-on plus static tokens
@@ -50,7 +51,7 @@ cmbd ──(outbound, internal only)──▶ identity provider JWKS endpoint (s
 ## Preflight (2026-10-31, on the build box)
 | check | result |
 |---|---|
-| cargo test --workspace | 69 passed, 0 failed, 5 ignored (Postgres; 5/5 pass with CAMBIUM_TEST_PG) |
+| cargo test --workspace | all pass; 5 Postgres tests run only with CAMBIUM_TEST_PG |
 | tests/e2e.sh | 109 / 109 |
 | tests/prod.sh | 38 / 38 |
 | tests/multinode.sh (Postgres 16, two cmbd nodes) | 9 / 9 |

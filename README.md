@@ -49,9 +49,9 @@ Scion in turn credits Meta's [Sapling](https://github.com/facebook/sapling) serv
 Earlier centralized systems (CVS, Subversion, Perforce) and Google's Piper are also prior art.
 
 ## Known issues
-Cambium is early alpha. Open hardening items include how OIDC identities are keyed (currently by
-username claim), JWKS refresh behaviour when the identity provider is down, and trusting
-`X-Forwarded-For` in the audit log. Do not use it for production data yet.
+Cambium is early alpha: the security and data-integrity fixes from the first review have landed,
+but it has not had an independent security review, and storage still keeps a full file list per
+changeset (being replaced by content-hashed trees). Do not use it for production data yet.
 
 ## License
 [MIT](LICENSE)

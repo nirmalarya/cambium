@@ -24,8 +24,8 @@ struct Edge {
     store: FsBlobStore,
 }
 
-const FWD_REQ: &[&str] = &["authorization", "content-type", "cookie", "range", "accept"];
-const FWD_RESP: &[&str] = &["content-type", "content-range", "accept-ranges", "set-cookie", "location", "retry-after"];
+const FWD_REQ: &[&str] = &["authorization", "content-type", "cookie", "range", "accept", "idempotency-key", "x-request-id"];
+const FWD_RESP: &[&str] = &["content-type", "content-range", "accept-ranges", "set-cookie", "location", "retry-after", "x-request-id"];
 
 fn upstream_call(
     e: &Edge,
