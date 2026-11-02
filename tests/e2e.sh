@@ -184,6 +184,14 @@ ok "Z03 cached blob still checked against the primary ACL" '[ "$(curl -s -o /dev
 ok "Z04 ranges served from the edge copy" '[ "$(curl -s -H "Authorization: Bearer $CAROL" -H "Range: bytes=0-8" $E/v1/blobs/$LID)" = quarterly ]'
 ok "Z05 writes pass through to the primary" '(cd $T/e1 && echo edge >> payments/ledger.txt && CAMBIUM_SERVER=$E CAMBIUM_TOKEN=$CAROL cmb add payments >/dev/null && CAMBIUM_SERVER=$E CAMBIUM_TOKEN=$CAROL cmb commit -m via-edge >/dev/null) && (cd $T && CAMBIUM_TOKEN=$CAROL cmb checkout sec e2 >/dev/null 2>&1 && grep -qx "edge" e2/payments/ledger.txt)'
 ok "Z06 redirects are passed back, not followed" '[ "$(curl -s -o /dev/null -w %{http_code} $E/ui/sec)" = 303 ]'
+# ---------- cache tiers: client -> cmbd daemon -> cmbd edge -> cmbd ----------
+DP=$((EP+1)); D=http://127.0.0.1:$DP
+CAMBIUM_UPSTREAM=$E CAMBIUM_ADDR=127.0.0.1:$DP CAMBIUM_DATA=$T/daemon $BIN/cmbd daemon 2>/dev/null & DAEMON=$!; trap 'kill $SRV $SRV2 $EDGE $DAEMON 2>/dev/null; rm -rf $T' EXIT
+for i in $(seq 50); do curl -sf $D/v1/health >/dev/null && break; sleep 0.1; done
+ok "Z07 checkout through daemon -> edge -> server matches" '(cd $T && CAMBIUM_SERVER=$D CAMBIUM_CACHE=$T/dc1 CAMBIUM_TOKEN=$CAROL cmb checkout sec d1 >/dev/null 2>&1 && diff -r --exclude=.cambium $T/e1 $T/d1)'
+ROOTID=$(curl -s -H "Authorization: Bearer $CAROL" $D/v1/repos/sec/root/main | python3 -c 'import sys,json; print(json.load(sys.stdin)["root"])')
+ok "Z08 trees and blobs are then served by the daemon tier" 'curl -s -D - -o /dev/null -H "Authorization: Bearer $CAROL" "$D/v1/repos/sec/trees/$ROOTID?path=" | grep -qi "^x-cambium-edge: hit" && curl -s -D - -o /dev/null -H "Authorization: Bearer $CAROL" $D/v1/blobs/$LID | tr -d "\r" | grep -qi "^x-cambium-tier: daemon" && curl -s -D - -o /dev/null -H "Authorization: Bearer $CAROL" $D/v1/blobs/$LID | grep -qi "^x-cambium-edge: hit"'
+ok "Z09 permissions hold through every tier" '[ "$(curl -s -o /dev/null -w %{http_code} -H "Authorization: Bearer $BOB" $D/v1/blobs/$LID)" = 404 ] && [ "$(curl -s -o /dev/null -w %{http_code} $D/v1/blobs/$LID)" = 401 ] && ! curl -s -H "Authorization: Bearer $BOB" "$D/v1/repos/sec/trees/$ROOTID?path=" | grep -q payments'
 
 # ---------- virtual checkout (FUSE lazy mount) ----------
 if [ -w /dev/fuse ] && command -v fusermount3 >/dev/null; then

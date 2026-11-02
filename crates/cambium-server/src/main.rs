@@ -751,8 +751,10 @@ fn main() {
         }
         _ => {}
     }
-    if std::env::args().nth(1).as_deref() == Some("edge") {
-        return edge::run();
+    match std::env::args().nth(1).as_deref() {
+        Some("edge") => return edge::run("edge"),
+        Some("daemon") => return edge::run("daemon"),
+        _ => {}
     }
     let data = std::env::var("CAMBIUM_DATA").unwrap_or_else(|_| "./cambium-data".into());
     std::fs::create_dir_all(&data).expect("data dir");
