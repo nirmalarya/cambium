@@ -24,8 +24,22 @@ struct State {
     stage: Vec<String>,
     /// what is materialised on disk: path -> entry (blob id, ":x" suffix if executable)
     files: BTreeMap<String, String>,
+    /// tip of local draft changesets not yet on `branch` (none when everything landed)
+    #[serde(default)]
+    drafts: Option<String>,
 }
 
+/// Error text for a server error body, with a hint where one helps.
+fn err_message(v: &Value) -> String {
+    let mut m = v["message"].as_str().unwrap_or("request failed").to_string();
+    if v["error"] == "forbidden" {
+        m.push_str("\nhint: ask a repo admin for access (`cmb acl list` shows the rules if you are one)");
+    }
+    if v["error"] == "ref_moved" {
+        m.push_str("\nhint: the ref moved on the server; run `cmb sync` and retry");
+    }
+    m
+}
 /// Plain http to anything but this machine.
 fn insecure_remote(server: &str) -> bool {
     let Some(rest) = server.strip_prefix("http://") else { return false };
@@ -74,17 +88,7 @@ impl Client {
     fn handle(r: Result<ureq::Response, ureq::Error>) -> Value {
         match r {
             Ok(resp) => resp.into_json().unwrap_or(Value::Null),
-            Err(ureq::Error::Status(_, resp)) => {
-                let v: Value = resp.into_json().unwrap_or(Value::Null);
-                let mut m = v["message"].as_str().unwrap_or("request failed").to_string();
-                if v["error"] == "forbidden" {
-                    m.push_str("\nhint: ask a repo admin for access (`cmb acl list` shows the rules if you are one)");
-                }
-                if v["error"] == "ref_moved" {
-                    m.push_str("\nhint: the branch moved on the server; run `cmb sync` then retry, or `cmb rebase`");
-                }
-                die(m)
-            }
+            Err(ureq::Error::Status(_, resp)) => die(err_message(&resp.into_json().unwrap_or(Value::Null))),
             Err(e) => die(format!("cannot reach server: {e}")),
         }
     }
@@ -122,6 +126,10 @@ impl Client {
     /// POST with an Idempotency-Key: a dropped connection is retried with the same
     /// key, so the server applies the commit/merge at most once.
     fn post_idem(&self, path: &str, body: Value) -> Value {
+        self.post_idem_try(path, body).unwrap_or_else(|v| die(err_message(&v)))
+    }
+    /// Like `post_idem`, but an error answer from the server comes back as `Err(body)`.
+    fn post_idem_try(&self, path: &str, body: Value) -> Result<Value, Value> {
         let key = {
             use rand::RngCore;
             let mut b = [0u8; 16];
@@ -139,7 +147,9 @@ impl Client {
                     eprintln!("cmb: connection problem ({e}); retrying safely ({}/{max})", attempt + 1);
                 }
                 Err(ureq::Error::Status(409, resp)) if attempt < max && resp.header("retry-after").is_some() => {}
-                other => return Self::handle(other),
+                Ok(resp) => return Ok(resp.into_json().unwrap_or(Value::Null)),
+                Err(ureq::Error::Status(_, resp)) => return Err(resp.into_json().unwrap_or(Value::Null)),
+                Err(e) => die(format!("cannot reach server: {e}")),
             }
             attempt += 1;
             std::thread::sleep(std::time::Duration::from_millis(500u64 << attempt.min(4)));
@@ -609,6 +619,41 @@ fn materialise(c: &Client, root: &Path, s: &mut State, target: &str) {
         );
     }
 }
+/// `--name` present? (removes it from args)
+fn take_flag(args: &mut Vec<String>, name: &str) -> bool {
+    let n = args.len();
+    args.retain(|a| a != name);
+    args.len() != n
+}
+/// Land the draft stack on the working copy's branch. If the branch is protected or
+/// the drafts conflict with it, they stay drafts and the user is told what to do.
+fn land_drafts(c: &Client, root: &Path, s: &mut State, what: &str) {
+    let d = s.drafts.clone().expect("drafts");
+    let (repo, b) = (s.repo.clone(), s.branch.clone());
+    match c.post_idem_try(&format!("/v1/repos/{repo}/land"), json!({"cs": d, "onto": b})) {
+        Ok(v) => {
+            let tip = v["cs"].as_str().unwrap().to_string();
+            s.drafts = None;
+            if tip != s.head {
+                // the server rebased onto newer work: lay out the landed result
+                materialise(c, root, s, &tip);
+            }
+            println!("[{b} {}] {what}", short(&tip));
+        }
+        Err(e) => {
+            save(root, s);
+            let why = if e["error"] == "forbidden" {
+                format!("{b} only changes through an approved review: open one with `cmb review create -m <title>`")
+            } else if e["error"] == "merge_conflict" {
+                format!("it conflicts with {b} in {}; fix with `cmb sync`, edit, then commit again", e["paths"])
+            } else {
+                err_message(&e)
+            };
+            eprintln!("cmb: kept as draft {}: {why}", short(&d));
+            std::process::exit(2);
+        }
+    }
+}
 /// Remove now-empty folders between `fp` and the working-copy root.
 fn remove_empty_parents(root: &Path, fp: &Path) {
     let mut d = fp.parent();
@@ -640,12 +685,13 @@ const HELP: &str = "cmb - thin client for a Cambium server
                                        lay out a (sparse) working copy
   cmb status                            local changes vs the checked-out changeset
   cmb add <path>...                     stage paths (deletions too)
-  cmb commit -m <msg>                   server creates the changeset and moves the branch
-  cmb branch [name]                     list branches, or create one here and switch to it
-  cmb switch <branch>                   move the working copy to another branch
-  cmb sync                              update to the branch head
-  cmb merge <rev>                       server merges <rev> into the current branch
-  cmb rebase <onto>                     server rebases the current branch onto <onto>
+  cmb commit -m <msg>                   create a changeset and land it (the server rebases if main moved)
+  cmb commit --draft -m <msg>           create a draft changeset only (stack several, review them)
+  cmb land                              land your drafts on the branch (rebase + compare-and-swap)
+  cmb branch [release/NAME]             list main and release branches, or create a release branch
+  cmb switch <main|release/NAME>        move the working copy to another branch
+  cmb sync                              update to the branch head (drafts are rebased onto it)
+  cmb merge <rev>                       server merges <rev> (e.g. a release fix) into the current branch
   cmb log [path] [-n N]                 history (first-parent), optionally for a path
   cmb blame <path>                      per-line origin, computed on the server
   cmb search <text> [--rev R] [-n N]    indexed search of paths and contents (only files you may read)
@@ -661,6 +707,7 @@ const HELP: &str = "cmb - thin client for a Cambium server
   cmb acl rm <prefix> <principal>       remove a rule
   cmb review create -m <title> [--target main]
                                        ask for review of the current branch
+  cmb review update <n>                 point review <n> at your current drafts (old approvals lapse)
   cmb review [list] | show <n> | comment <n> <text> | approve <n> | merge <n> | close <n>
   cmb protect [<branch> <approvals>]    require N approvals (by others) to change a branch
   cmb whoami                            the user and groups the server sees for your token
@@ -811,9 +858,10 @@ fn run_wc(cmd: &str, mut args: Vec<String>, c: &Client, root: &Path, s: &mut Sta
     match cmd {
         "status" => {
             println!(
-                "on {} at {}{}",
+                "on {} at {}{}{}",
                 s.branch,
                 short(&s.head),
+                if s.drafts.is_some() { " (drafts not landed; `cmb land` or `cmb review create`)" } else { "" },
                 if s.sparse.is_empty() { String::new() } else { format!(" (sparse: {})", s.sparse.join(", ")) }
             );
             let ch = changes(root, s);
@@ -862,7 +910,8 @@ fn run_wc(cmd: &str, mut args: Vec<String>, c: &Client, root: &Path, s: &mut Sta
             }
         }
         "commit" => {
-            let msg = flag(&mut args, "-m").unwrap_or_else(|| die("usage: cmb commit -m <message>"));
+            let draft = take_flag(&mut args, "--draft");
+            let msg = flag(&mut args, "-m").unwrap_or_else(|| die("usage: cmb commit -m <message> [--draft]"));
             if s.stage.is_empty() {
                 die("nothing staged (use `cmb add`)");
             }
@@ -872,10 +921,8 @@ fn run_wc(cmd: &str, mut args: Vec<String>, c: &Client, root: &Path, s: &mut Sta
                 let blob = if present(&fp) { Some(c.put_blob(&read_content(&fp).unwrap())) } else { None };
                 files.push(json!({"path": p, "blob": blob, "mode": file_mode(&fp)}));
             }
-            let v = c.post_idem(
-                &format!("/v1/repos/{repo}/commit"),
-                json!({"ref": s.branch, "expected": s.head, "message": msg, "files": files}),
-            );
+            // 1. a changeset on top of what this working copy shows; no ref is touched
+            let v = c.post_idem(&format!("/v1/repos/{repo}/changesets"), json!({"parent": s.head, "message": msg, "files": files}));
             for f in v["files"].as_array().unwrap() {
                 let p = f["path"].as_str().unwrap().to_string();
                 let mode = f["mode"].as_u64().unwrap_or(MODE_FILE as u64) as u32;
@@ -889,8 +936,23 @@ fn run_wc(cmd: &str, mut args: Vec<String>, c: &Client, root: &Path, s: &mut Sta
                 }
             }
             s.head = v["id"].as_str().unwrap().into();
+            s.drafts = Some(s.head.clone());
             s.stage.clear();
-            println!("[{} {}] {}", s.branch, short(&s.head), msg);
+            if draft {
+                println!("[draft {}] {}  (land with `cmb land`, or `cmb review create`)", short(&s.head), msg);
+                return;
+            }
+            // 2. land it: the server rebases onto the current head and moves the ref
+            land_drafts(c, root, s, &msg);
+        }
+        "land" => {
+            if s.drafts.is_none() {
+                die("no drafts to land (commit with --draft first)");
+            }
+            if !changes(root, s).is_empty() {
+                die("commit or discard local changes before landing");
+            }
+            land_drafts(c, root, s, "drafts");
         }
         "branch" => match args.first() {
             None => {
@@ -900,40 +962,48 @@ fn run_wc(cmd: &str, mut args: Vec<String>, c: &Client, root: &Path, s: &mut Sta
                 }
             }
             Some(name) => {
-                c.post(&format!("/v1/repos/{repo}/refs/{name}"), json!({"expected": null, "new": s.head}));
-                s.branch = name.clone();
-                println!("created {name} at {} and switched to it", short(&s.head));
+                // only release branches can be created: work moves as changesets and reviews
+                let name = if name.starts_with("release/") { name.clone() } else { format!("release/{name}") };
+                let at = s.drafts.clone().unwrap_or_else(|| s.head.clone());
+                c.post(&format!("/v1/repos/{repo}/refs/{name}"), json!({"expected": null, "new": at}));
+                println!("created {name} at {}", short(&at));
             }
         },
         "switch" => {
-            let b = args.first().cloned().unwrap_or_else(|| die("usage: cmb switch <branch>"));
+            let b = args.first().cloned().unwrap_or_else(|| die("usage: cmb switch <main|release/NAME>"));
+            if s.drafts.is_some() {
+                die("you have drafts; land them (`cmb land`) or open a review before switching");
+            }
             materialise(c, root, s, &b);
             s.branch = b;
         }
-        "sync" => {
-            let b = s.branch.clone();
-            materialise(c, root, s, &b);
-        }
+        "sync" => match s.drafts.clone() {
+            // drafts are rebased onto the latest head on the server, then laid out here
+            Some(d) => {
+                let b = s.branch.clone();
+                let v = c.post(&format!("/v1/repos/{repo}/rebase"), json!({"cs": d, "onto": b}));
+                let tip = v["cs"].as_str().unwrap().to_string();
+                materialise(c, root, s, &tip);
+                // drafts that already landed (e.g. via a review) rebase to the head itself
+                let head = c.get(&format!("/v1/repos/{repo}/resolve/{b}"), &[]);
+                s.drafts = if head["cs"].as_str() == Some(tip.as_str()) { None } else { Some(tip) };
+            }
+            None => {
+                let b = s.branch.clone();
+                materialise(c, root, s, &b);
+            }
+        },
         "merge" => {
             let src = args.first().cloned().unwrap_or_else(|| die("usage: cmb merge <rev>"));
-            if !changes(root, s).is_empty() {
-                die("commit or discard local changes before merging");
+            if !changes(root, s).is_empty() || s.drafts.is_some() {
+                die("land or discard local changes and drafts before merging");
             }
             let v = c.post_idem(&format!("/v1/repos/{repo}/merge"), json!({"target": s.branch, "source": src}));
             println!("merged {src} into {} as {}", s.branch, short(v["id"].as_str().unwrap()));
             let b = s.branch.clone();
             materialise(c, root, s, &b);
         }
-        "rebase" => {
-            let onto = args.first().cloned().unwrap_or_else(|| die("usage: cmb rebase <onto>"));
-            if !changes(root, s).is_empty() {
-                die("commit or discard local changes before rebasing");
-            }
-            let v = c.post(&format!("/v1/repos/{repo}/rebase"), json!({"branch": s.branch, "onto": onto}));
-            println!("rebased {} onto {onto}: now {}", s.branch, short(v["cs"].as_str().unwrap()));
-            let b = s.branch.clone();
-            materialise(c, root, s, &b);
-        }
+        "rebase" => die("`cmb rebase` is gone: `cmb sync` rebases your drafts onto the latest head, and landing always rebases"),
         "log" => {
             let n = flag(&mut args, "-n").unwrap_or_else(|| "20".into());
             let path = args.first().map(|a| rel(root, a));
@@ -1017,8 +1087,15 @@ fn run_wc(cmd: &str, mut args: Vec<String>, c: &Client, root: &Path, s: &mut Sta
                 "create" => {
                     let target = flag(&mut args, "--target").unwrap_or_else(|| "main".into());
                     let title = flag(&mut args, "-m").or_else(|| args.first().cloned()).unwrap_or_else(|| die("usage: cmb review create -m <title> [--target main]"));
-                    let v = c.post(&format!("/v1/repos/{repo}/reviews"), json!({"source": s.branch, "target": target, "title": title}));
-                    println!("review #{} opened: {} -> {} ({}/ui/{repo}/reviews/{})", v["id"], s.branch, target, c.server, v["id"]);
+                    let src = s.drafts.clone().unwrap_or_else(|| die("no drafts to review: `cmb commit --draft -m ...` first"));
+                    let v = c.post(&format!("/v1/repos/{repo}/reviews"), json!({"source": src, "target": target, "title": title}));
+                    println!("review #{} opened: {} -> {} ({}/ui/{repo}/reviews/{})", v["id"], short(&src), target, c.server, v["id"]);
+                }
+                "update" => {
+                    let n = id(&args);
+                    let src = s.drafts.clone().unwrap_or_else(|| die("no drafts: commit the revision with --draft first"));
+                    c.post(&format!("/v1/repos/{repo}/reviews/{n}/update"), json!({"cs": src}));
+                    println!("review #{n} now at {} (earlier approvals no longer count)", short(&src));
                 }
                 "list" => for r in c.get(&format!("/v1/repos/{repo}/reviews"), &[]).as_array().unwrap() {
                     println!("#{:<4} {:<7} {}/{} {} -> {}  {}  ({})", r["id"], r["state"].as_str().unwrap(), r["approvals"].as_array().unwrap().len(), r["required"],
@@ -1042,9 +1119,16 @@ fn run_wc(cmd: &str, mut args: Vec<String>, c: &Client, root: &Path, s: &mut Sta
                 "approve" => { let n = id(&args); let v = c.post(&format!("/v1/repos/{repo}/reviews/{n}/approve"), json!({}));
                     println!("approved #{n} ({}/{} approvals)", v["approvals"].as_array().unwrap().len(), v["required"]); }
                 "merge" => { let n = id(&args); let v = c.post(&format!("/v1/repos/{repo}/reviews/{n}/merge"), json!({}));
-                    println!("merged #{n} as {}", short(v["id"].as_str().unwrap_or(""))); }
+                    println!("merged #{n} as {}", short(v["id"].as_str().unwrap_or("")));
+                    // if this working copy held the reviewed drafts, they are now on the branch
+                    let landed = c.get(&format!("/v1/repos/{repo}/reviews/{n}"), &[]);
+                    if s.drafts.as_deref() == landed["review"]["source"].as_str() {
+                        s.drafts = None;
+                        let b = s.branch.clone();
+                        materialise(c, root, s, &b);
+                    } }
                 "close" => { let n = id(&args); c.post(&format!("/v1/repos/{repo}/reviews/{n}/close"), json!({})); println!("closed #{n}"); }
-                _ => die("usage: cmb review [list | create -m <title> [--target B] | show <n> | comment <n> <text> | approve <n> | merge <n> | close <n>]"),
+                _ => die("usage: cmb review [list | create -m <title> [--target B] | update <n> | show <n> | comment <n> <text> | approve <n> | merge <n> | close <n>]"),
             }
         }
         "acl" => match args.first().map(String::as_str) {

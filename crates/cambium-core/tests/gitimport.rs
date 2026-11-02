@@ -63,16 +63,21 @@ fn imports_full_history_with_branches_merges_and_modes() {
     g(&r, &["mv", "src/feat.rs", "src/renamed.rs"], 0);
     g(&r, &["commit", "-qm", "rename"], 1_600_000_400);
 
+    g(&r, &["branch", "release/1.0", "feature"], 0);
     let dd = tempfile::tempdir().unwrap();
     let e = Engine::open(dd.path().join("cambium.db").to_str().unwrap(), Arc::new(MemBlobStore::default())).unwrap();
     let rep = e.import_git(&r, "imp", "alice").unwrap();
     assert_eq!(rep.commits, 5);
-    assert!(rep.skipped.is_empty(), "{:?}", rep.skipped);
     let names: Vec<&str> = rep.refs.iter().map(|(n, _)| n.as_str()).collect();
-    assert!(names.contains(&"main") && names.contains(&"feature") && names.contains(&"tags/v1"), "{names:?}");
+    assert_eq!(names, vec!["main", "release/1.0"], "only main and release refs");
+    assert!(
+        rep.skipped.iter().any(|s| s.contains("ref feature")) && rep.skipped.iter().any(|s| s.contains("ref tags/v1")),
+        "{:?}",
+        rep.skipped
+    );
 
     // every ref's tree equals Git's, byte for byte
-    for (bvref, gitref) in [("main", "main"), ("feature", "feature"), ("tags/v1", "v1")] {
+    for (bvref, gitref) in [("main", "main"), ("release/1.0", "feature")] {
         let cs = e.get_ref("imp", bvref).unwrap().unwrap();
         let m = e.manifest("imp", &cs).unwrap();
         let ls = g(&r, &["ls-tree", "-r", gitref], 0);
@@ -104,7 +109,7 @@ fn imports_full_history_with_branches_merges_and_modes() {
     assert_eq!(log[0].author, "Ada Example <ada@example.invalid>");
     assert_eq!(log[0].created_at, 1_600_000_400);
     assert_eq!(log[1].parents.len(), 2, "merge keeps both parents");
-    let feature = e.get_ref("imp", "feature").unwrap().unwrap();
+    let feature = e.get_ref("imp", "release/1.0").unwrap().unwrap();
     assert!(e.is_ancestor("imp", &feature, &main).unwrap());
     // path history works on imported data
     let lp = e.log("imp", &main, Some("src/renamed.rs"), 10).unwrap();

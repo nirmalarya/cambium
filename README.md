@@ -21,8 +21,17 @@ cmb log; cmb blame hello.txt
 Docker: `docker compose up --build -d`, then `docker compose exec cmbd cmbd token alice`.
 
 ## Commands
-`init, checkout [--sparse], status, add, commit, branch, switch, sync, merge, rebase, log, blame,
-diff, search, sparse, cat, mount [--write], watch, acl, protect, review, whoami` — see `cmb help`.
+`init, checkout [--sparse], status, add, commit [--draft], land, sync, branch, switch, merge, log,
+blame, diff, search, sparse, cat, mount [--write], watch, acl, protect, review, whoami` — see `cmb help`.
+
+## Workflow (Scion's model: no feature branches)
+- **Refs:** only `main` and `release/<name>`. Every ref move is a compare-and-swap on one row.
+- **Commit:** `cmb commit -m msg` creates a changeset and lands it on `main`. If someone else landed
+  first, the server rebases yours onto the new head (lock-free, no merge queue).
+- **Drafts and review:** `cmb commit --draft` stacks changesets without touching any ref.
+  `cmb review create -m title` opens a review of the drafts; `cmb review update <n>` points it at a
+  revision. Protected refs only change through an approved review; merging it lands the changeset.
+- **Stay current:** `cmb sync` updates the working copy; drafts are rebased onto the new head.
 
 ## Sign-in and permissions
 - **People:** sign in through your identity provider (OIDC). Set `CAMBIUM_TOKEN_CMD` to a helper that prints a token.
@@ -32,11 +41,13 @@ diff, search, sparse, cat, mount [--write], watch, acl, protect, review, whoami`
 
 ## Design
 - **Changesets** list only files changed vs the first parent, with content-addressed blob ids; each is a row in a **write-ahead log** table.
-- **Refs** move only by compare-and-swap on one row; creating a changeset never touches refs.
+- **Refs** (`main`, `release/*`) move only by compare-and-swap on one row; creating a changeset never touches refs.
 - **Derived data** (manifests, per-line blame, path history, generation numbers) is computed from parents and cached.
 - **Blobs** go through a `BlobStore` trait: filesystem (zlib) or S3-compatible object storage.
 - **Metadata:** SQLite (WAL mode) for a single node, Postgres for multiple nodes. Schemas in `docs/schema.sql` and `docs/schema-pg.sql`.
 - **Deployment:** Docker image, Helm chart in `deploy/helm/cambium`.
+
+See `docs/design/scion-alignment.md` for how each part maps to Scion's published design.
 
 ## Prior art and attribution
 The design follows the ideas Anthropic published about **Scion**, its in-house source control system

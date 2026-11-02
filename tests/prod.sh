@@ -26,7 +26,7 @@ ok "P05 hostile request id replaced" '! curl -sI -H "x-request-id: a b<script>" 
 cd $T; cmb init demo wc >/dev/null 2>&1; cd wc; echo hi > a.txt; cmb add a.txt >/dev/null; cmb commit -m one >/dev/null; cd $T
 code $CAMBIUM_SERVER/v1/repos/demo/refs >/dev/null
 curl -s $CAMBIUM_SERVER/metrics > $T/m
-ok "P06 metrics: request counter by route and status" 'grep -q "^cambium_http_requests_total{.*route=\"/v1/repos/:r/commit\".*status=\"200\"" $T/m'
+ok "P06 metrics: request counter by route and status" 'grep -q "^cambium_http_requests_total{.*route=\"/v1/repos/:r/land\".*status=\"200\"" $T/m'
 ok "P07 metrics: latency histogram" 'grep -q "^cambium_http_request_duration_seconds_bucket" $T/m && grep -q "_count" $T/m'
 ok "P08 metrics: auth failures, rate limits, WAL lag, pool" 'grep -q "^cambium_auth_failures_total [1-9]" $T/m && grep -q "^cambium_rate_limited_total" $T/m && grep -q "^cambium_wal_head_seq" $T/m && grep -q "^cambium_wal_derived_lag" $T/m'
 ok "P09 JSON access log line with request id and actor" 'grep "\"msg\":\"request\"" $T/srv.log | grep "\"actor\":\"alice\"" | python3 -c "import sys,json; [json.loads(l) for l in sys.stdin]; print(1)" | grep -q 1 && grep -q "\"request_id\"" $T/srv.log'
@@ -70,7 +70,7 @@ cmb add pay doc.txt >/dev/null; cmb commit -m owners >/dev/null
 curl -s -H "$A" -H "content-type: application/json" -d '{"prefix":"","principal":"user:alice","perm":"admin"}' $CAMBIUM_SERVER/v1/repos/own/acl >/dev/null
 curl -s -H "$A" -H "content-type: application/json" -d '{"prefix":"","principal":"group:payments","perm":"write"}' $CAMBIUM_SERVER/v1/repos/own/acl >/dev/null
 curl -s -H "$A" -H "content-type: application/json" -d '{"prefix":"","principal":"user:dave","perm":"write"}' $CAMBIUM_SERVER/v1/repos/own/acl >/dev/null
-cmb branch f >/dev/null 2>&1; echo 2 > pay/x.txt; cmb add pay >/dev/null; cmb commit -m change >/dev/null; cmb review create -m pay >/dev/null 2>&1
+echo 2 > pay/x.txt; cmb add pay >/dev/null; cmb commit --draft -m change >/dev/null; cmb review create -m pay >/dev/null 2>&1
 ok "P28 review lists pending code owners" 'curl -s -H "$A" $CAMBIUM_SERVER/v1/repos/own/reviews/1 | grep -q "pay/OWNERS (group:payments)"'
 CKO=$(curl -s -D - -o /dev/null -d "token=$NEW" $CAMBIUM_SERVER/ui/login | grep -i set-cookie | sed 's/^[^:]*: //; s/;.*//')
 ok "P28b review UI shows the pending code owners and disables merge" 'curl -s -b "$CKO" $CAMBIUM_SERVER/ui/own/reviews/1 > $T/ow.html && grep -q "Code-owner approval needed: <code>pay/OWNERS (group:payments)</code>" $T/ow.html && grep -q "<button disabled" $T/ow.html'

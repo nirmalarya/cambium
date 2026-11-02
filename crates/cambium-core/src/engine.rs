@@ -197,6 +197,15 @@ fn now() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64
 }
 
+/// Ref names allowed through the API: `main` and `release/<name>` (Scion's model:
+/// no feature branches; work moves as changesets and reviews).
+pub fn valid_ref_name(name: &str) -> bool {
+    name == "main"
+        || name.strip_prefix("release/").is_some_and(|r| {
+            !r.is_empty() && r.len() <= 100 && r.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)) && !r.starts_with('.')
+        })
+}
+
 pub fn valid_path(p: &str) -> bool {
     !p.is_empty()
         && !p.starts_with('/')
@@ -1078,6 +1087,62 @@ impl Engine {
             t.exec("DELETE FROM repos WHERE name=?1", &p![&r])?;
             Ok(())
         })
+    }
+
+    /// Replay the changesets between `merge_base(cs, onto)` and `cs` on top of `onto`
+    /// and return the new tip. Writes changesets only, never a ref. If `cs` is already
+    /// on top of `onto`, returns `cs`; if it is already contained in `onto`, returns `onto`.
+    pub fn rebase_onto(&self, repo: &str, cs: &str, onto: &str, check: &dyn Fn(&[FileChange]) -> Result<()>) -> Result<String> {
+        let base = self.merge_base(repo, cs, onto)?.ok_or_else(|| Error::Bad("no common ancestor".into()))?;
+        if base == onto {
+            return Ok(cs.to_string());
+        }
+        if base == cs {
+            return Ok(onto.to_string());
+        }
+        let mut todo = vec![];
+        let mut cur = cs.to_string();
+        while cur != base {
+            let ch = self.get_changeset(repo, &cur)?;
+            if ch.parents.len() > 1 {
+                return Err(Error::Bad("cannot rebase across merges".into()));
+            }
+            cur = ch.parents.first().cloned().ok_or_else(|| Error::Bad("unrelated".into()))?;
+            todo.push(ch);
+        }
+        let mut tip = onto.to_string();
+        for ch in todo.iter().rev() {
+            let mp = self.manifest(repo, &ch.parents[0])?;
+            let mc = self.manifest(repo, &ch.id)?;
+            let mt = self.manifest(repo, &tip)?;
+            let merged = self.merge_manifests(&mp, &mt, &mc)?.map_err(Error::Conflict)?;
+            let files = Self::changes_between(&mt, &merged);
+            if files.is_empty() {
+                continue; // already applied upstream (e.g. landed before): drop it
+            }
+            check(&files)?;
+            tip = self.create_changeset(repo, vec![tip], &ch.author, &ch.message, files)?.id;
+        }
+        Ok(tip)
+    }
+    /// Land changeset `cs` (and the drafts under it) on ref `target`: rebase onto the
+    /// current head and compare-and-swap, retrying if someone else landed first.
+    /// Lock-free, no merge queue. Returns the new head.
+    pub fn land(&self, repo: &str, cs: &str, target: &str, check: &dyn Fn(&[FileChange]) -> Result<()>) -> Result<String> {
+        let cs = self.resolve(repo, cs)?;
+        for _ in 0..16 {
+            let head = self.get_ref(repo, target)?.ok_or_else(|| Error::NotFound(format!("ref {target}")))?;
+            let tip = self.rebase_onto(repo, &cs, &head, check)?;
+            if tip == head {
+                return Ok(head); // already landed
+            }
+            match self.cas_ref(repo, target, Some(&head), Some(&tip)) {
+                Ok(()) => return Ok(tip),
+                Err(Error::RefMoved { .. }) => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(Error::Bad(format!("{target} kept moving; try again")))
     }
 
     pub fn wal_len(&self, repo: &str) -> Result<i64> {

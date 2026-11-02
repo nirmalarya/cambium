@@ -56,7 +56,7 @@ async fn create(State(st): State<St>, h: HeaderMap, Path(r): Path<String>, Json(
     Ok(Json(json!(st.review(&r, id)?)))
 }
 fn review_diff(st: &St, az: &cambium_core::Authz, r: &str, rv: &cambium_core::review::Review) -> Result<String, ApiErr> {
-    let s = st.get_ref(r, &rv.source)?.ok_or_else(|| Error::NotFound(format!("ref {}", rv.source)))?;
+    let s = rv.source.clone(); // the changeset under review
     let t = st.get_ref(r, &rv.target)?.ok_or_else(|| Error::NotFound(format!("ref {}", rv.target)))?;
     let base = st.merge_base(r, &t, &s)?.unwrap_or(t);
     let (mb, ms): (Manifest, Manifest) = (az.filter(st.manifest(r, &base)?), az.filter(st.manifest(r, &s)?));
@@ -64,7 +64,7 @@ fn review_diff(st: &St, az: &cambium_core::Authz, r: &str, rv: &cambium_core::re
 }
 /// Paths changed by the review (merge base vs source), unfiltered.
 fn changed_paths(st: &St, r: &str, rv: &cambium_core::review::Review) -> Result<Vec<String>, ApiErr> {
-    let s = st.get_ref(r, &rv.source)?.ok_or_else(|| Error::NotFound(format!("ref {}", rv.source)))?;
+    let s = rv.source.clone(); // the changeset under review
     let t = st.get_ref(r, &rv.target)?.ok_or_else(|| Error::NotFound(format!("ref {}", rv.target)))?;
     let base = st.merge_base(r, &t, &s)?.unwrap_or(t);
     let (mb, ms) = (st.manifest(r, &base)?, st.manifest(r, &s)?);
@@ -107,6 +107,15 @@ async fn merge(State(st): State<St>, h: HeaderMap, Path((r, id)): Path<(String, 
     let (u, az) = reader(&st, &h, &r)?;
     Ok(Json(json!(st.merge_review(&r, id, &u.user, &|f| check_writes(&az, f)).map_err(|e| crate::hide_conflicts(e, &az))?)))
 }
+#[derive(Deserialize)]
+pub struct UpdateReview {
+    cs: String,
+}
+async fn update(State(st): State<St>, h: HeaderMap, Path((r, id)): Path<(String, i64)>, Json(b): Json<UpdateReview>) -> R {
+    let (u, _) = reader(&st, &h, &r)?;
+    st.update_review(&r, id, &u.user, &b.cs)?;
+    Ok(Json(json!(st.review(&r, id)?)))
+}
 async fn close(State(st): State<St>, h: HeaderMap, Path((r, id)): Path<(String, i64)>) -> R {
     let (u, _) = reader(&st, &h, &r)?;
     st.close_review(&r, id, &u.user)?;
@@ -130,6 +139,7 @@ pub fn api() -> Router<St> {
         .route("/v1/repos/:r/reviews/:id/approve", post(approve))
         .route("/v1/repos/:r/reviews/:id/merge", post(merge))
         .route("/v1/repos/:r/reviews/:id/close", post(close))
+        .route("/v1/repos/:r/reviews/:id/update", post(update))
         .route("/v1/repos/:r/protected", get(protected).post(protect))
 }
 

@@ -173,6 +173,11 @@ async fn cas(State(st): State<St>, h: HeaderMap, Path((r, name)): Path<(String, 
         Some(n) => Some(st.resolve(&r, n)?),
         None => None,
     };
+    if b.expected.is_none() && !cambium_core::engine::valid_ref_name(&name) {
+        return Err(ApiErr(Error::Bad(format!(
+            "ref {name:?} not allowed: only main and release/<name> (work moves as changesets and reviews)"
+        ))));
+    }
     if b.expected.is_some() {
         guard_protected(&st, &r, &name)?;
     }
@@ -332,14 +337,56 @@ async fn merge(State(st): State<St>, h: HeaderMap, Path(r): Path<String>, Json(b
 }
 #[derive(Deserialize)]
 struct Rebase {
-    branch: String,
+    cs: String,
     onto: String,
 }
+/// Rebase changeset `cs` (and the drafts under it) onto revision `onto` and return the
+/// new tip. Moves no ref: used to bring drafts up to date before review or landing.
 async fn rebase(State(st): State<St>, h: HeaderMap, Path(r): Path<String>, Json(b): Json<Rebase>) -> R {
     let u = user(&st, &h)?;
     let az = st.authz(&r, &u)?;
-    guard_protected(&st, &r, &b.branch)?;
-    Ok(Json(json!({"cs": st.rebase_checked(&r, &b.branch, &b.onto, &|f| check_writes(&az, f)).map_err(|e| hide_conflicts(e, &az))?})))
+    need(az.can_any(Perm::Read), "read on this repo")?;
+    let (cs, onto) = (st.resolve(&r, &b.cs)?, st.resolve(&r, &b.onto)?);
+    Ok(Json(json!({"cs": st.rebase_onto(&r, &cs, &onto, &|f| check_writes(&az, f)).map_err(|e| hide_conflicts(e, &az))?})))
+}
+#[derive(Deserialize)]
+struct NewChangeset {
+    parent: String,
+    message: String,
+    files: Vec<FileChange>,
+}
+/// Create a changeset on `parent` without touching any ref (a draft). Land it with
+/// `/land` or open a review for it.
+async fn create_changeset(State(st): State<St>, h: HeaderMap, Path(r): Path<String>, Json(b): Json<NewChangeset>) -> R {
+    let u = user(&st, &h)?;
+    let az = st.authz(&r, &u)?;
+    check_writes(&az, &b.files)?;
+    for f in &b.files {
+        if let Some(id) = &f.blob {
+            need_blob(&st, id, &u)?;
+        }
+    }
+    let parent = st.resolve(&r, &b.parent)?;
+    Ok(Json(json!(st.create_changeset(&r, vec![parent], &u.user, &b.message, b.files)?)))
+}
+#[derive(Deserialize)]
+struct Land {
+    cs: String,
+    #[serde(default = "main_ref")]
+    onto: String,
+}
+fn main_ref() -> String {
+    "main".into()
+}
+/// Land changeset `cs` on ref `onto`: server-side rebase onto the current head plus a
+/// compare-and-swap, retried if someone else landed first. Protected refs only change
+/// through an approved review.
+async fn land(State(st): State<St>, h: HeaderMap, Path(r): Path<String>, Json(b): Json<Land>) -> R {
+    let u = user(&st, &h)?;
+    let az = st.authz(&r, &u)?;
+    guard_protected(&st, &r, &b.onto)?;
+    let tip = st.land(&r, &b.cs, &b.onto, &|f| check_writes(&az, f)).map_err(|e| hide_conflicts(e, &az))?;
+    Ok(Json(json!({"ref": b.onto, "cs": tip})))
 }
 #[derive(Deserialize)]
 struct LogQ {
@@ -568,12 +615,14 @@ pub fn app(st: St, lim: Arc<RateLimiter>) -> Router {
         .route("/metrics", get(obs::metrics_endpoint))
         .route("/v1/repos", post(create_repo))
         .route("/v1/repos/:r/refs", get(refs))
-        .route("/v1/repos/:r/refs/:name", post(cas))
-        .route("/v1/repos/:r/resolve/:rev", get(resolve))
+        .route("/v1/repos/:r/refs/*name", post(cas))
+        .route("/v1/repos/:r/resolve/*rev", get(resolve))
         .route("/v1/repos/:r/commit", post(commit))
         .route("/v1/repos/:r/tree", post(tree))
         .route("/v1/repos/:r/merge", post(merge))
         .route("/v1/repos/:r/rebase", post(rebase))
+        .route("/v1/repos/:r/changesets", post(create_changeset))
+        .route("/v1/repos/:r/land", post(land))
         .route("/v1/repos/:r/log", get(log))
         .route("/v1/repos/:r/blame", get(blame))
         .route("/v1/repos/:r/search", get(search))
@@ -946,7 +995,7 @@ mod tests {
         e.create_repo("a", "alice").unwrap();
         e.create_repo("b", "alice").unwrap();
         let req = |repo: &str| {
-            Req::post(format!("/v1/repos/{repo}/refs/feat"))
+            Req::post(format!("/v1/repos/{repo}/refs/release/1"))
                 .header("authorization", format!("Bearer {t}"))
                 .header("content-type", "application/json")
                 .header("idempotency-key", "k1")
@@ -955,7 +1004,7 @@ mod tests {
         };
         assert_eq!(app.clone().oneshot(req("a")).await.unwrap().status(), 200);
         app.clone().oneshot(req("b")).await.unwrap();
-        assert!(e.get_ref("b", "feat").unwrap().is_some(), "repo b got its own ref, not a replay of repo a");
+        assert!(e.get_ref("b", "release/1").unwrap().is_some(), "repo b got its own ref, not a replay of repo a");
     }
 
     /// Deleting a branch needs write on every path where it differs from main.

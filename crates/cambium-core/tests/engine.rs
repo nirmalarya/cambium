@@ -408,14 +408,16 @@ fn review_needs_n_approvals_from_others_on_current_head() {
     let alice = Principal::new("alice");
     e.set_protected("r", &alice, "main", 2).unwrap();
     assert!(e.set_protected("r", &Principal::new("mallory"), "main", 0).is_err(), "non-owner cannot lift protection");
-    e.cas_ref("r", "feat", None, Some(&root)).unwrap();
-    let c1 = e.commit("r", "feat", &root, "alice", "f1", vec![put(&e, "a.txt", "1\n")]).unwrap();
-    let id = e.create_review("r", "feat", "main", "add a", "alice").unwrap();
+    // work is a draft changeset (no branch); the review points at it
+    let c1 = e.create_changeset("r", vec![root.clone()], "alice", "f1", vec![put(&e, "a.txt", "1\n")]).unwrap();
+    let id = e.create_review("r", &c1.id, "main", "add a", "alice").unwrap();
     assert!(matches!(e.approve("r", id, "alice"), Err(Error::Forbidden(_))), "no self-approval");
     e.approve("r", id, "bob").unwrap();
     assert!(matches!(e.merge_review("r", id, "alice", &|_| Ok(())), Err(Error::Forbidden(_))), "1 of 2");
-    // a new push to the source makes earlier approvals stale
-    e.commit("r", "feat", &c1.id, "alice", "f2", vec![put(&e, "b.txt", "2\n")]).unwrap();
+    // a revised changeset makes earlier approvals stale
+    let c2 = e.create_changeset("r", vec![c1.id.clone()], "alice", "f2", vec![put(&e, "b.txt", "2\n")]).unwrap();
+    assert!(e.update_review("r", id, "bob", &c2.id).is_err(), "only the author updates");
+    e.update_review("r", id, "alice", &c2.id).unwrap();
     e.approve("r", id, "carol").unwrap();
     assert_eq!(e.review("r", id).unwrap().approvals, vec!["carol".to_string()]);
     e.approve("r", id, "bob").unwrap();
@@ -423,9 +425,12 @@ fn review_needs_n_approvals_from_others_on_current_head() {
     assert_eq!((rv.approvals.len(), rv.required), (2, 2));
     e.comment("r", id, "bob", Some("a.txt"), "looks good").unwrap();
     assert_eq!(e.comments("r", id).unwrap().len(), 1);
+    // main moved meanwhile: landing rebases the reviewed stack onto it
+    let m0 = e.commit("r", "main", &root, "alice", "other", vec![put(&e, "c.txt", "3\n")]);
+    assert!(m0.is_ok());
     let m = e.merge_review("r", id, "alice", &|_| Ok(())).unwrap();
     assert_eq!(e.get_ref("r", "main").unwrap(), Some(m.id.clone()));
-    assert_eq!(e.manifest("r", &m.id).unwrap().len(), 2);
+    assert_eq!(e.manifest("r", &m.id).unwrap().len(), 3);
     assert_eq!(e.review("r", id).unwrap().state, "merged");
     assert!(e.merge_review("r", id, "alice", &|_| Ok(())).is_err(), "cannot merge twice");
     assert!(e.approve("r", id, "dave").is_err());
@@ -434,18 +439,37 @@ fn review_needs_n_approvals_from_others_on_current_head() {
 fn review_validation() {
     let (e, _d) = eng();
     let root = e.create_repo("r", "alice").unwrap();
-    assert!(e.create_review("r", "main", "main", "t", "alice").is_err());
+    assert!(e.create_review("r", "main", "main", "t", "alice").is_err(), "already in main");
     assert!(e.create_review("r", "nope", "main", "t", "alice").is_err());
-    e.cas_ref("r", "f", None, Some(&root)).unwrap();
-    assert!(e.create_review("r", "f", "main", "   ", "alice").is_err());
-    let id = e.create_review("r", "f", "main", "t", "alice").unwrap();
+    let d = e.create_changeset("r", vec![root.clone()], "alice", "d", vec![put(&e, "x", "1\n")]).unwrap().id;
+    assert!(e.create_review("r", &d, "main", "   ", "alice").is_err());
+    let id = e.create_review("r", &d, "main", "t", "alice").unwrap();
     assert!(e.close_review("r", id, "bob").is_err());
     e.close_review("r", id, "alice").unwrap();
     assert_eq!(e.reviews("r", Some("closed")).unwrap().len(), 1);
     assert!(e.comment("r", id, "bob", None, "").is_err());
     // unprotected target: zero approvals needed
-    let id2 = e.create_review("r", "f", "main", "t2", "alice").unwrap();
+    let id2 = e.create_review("r", &d, "main", "t2", "alice").unwrap();
     assert_eq!(e.review("r", id2).unwrap().required, 0);
+}
+#[test]
+fn land_rebases_onto_moved_head_without_a_lock() {
+    let (e, _d) = eng();
+    let root = e.create_repo("r", "u").unwrap();
+    let draft = e.create_changeset("r", vec![root.clone()], "u", "mine", vec![put(&e, "a", "1\n")]).unwrap().id;
+    // someone else lands first
+    let other = e.commit("r", "main", &root, "v", "theirs", vec![put(&e, "b", "1\n")]).unwrap().id;
+    let tip = e.land("r", &draft, "main", &|_| Ok(())).unwrap();
+    assert_eq!(e.get_changeset("r", &tip).unwrap().parents, vec![other.clone()]);
+    assert_eq!(e.manifest("r", &tip).unwrap().len(), 2);
+    // landing again is a no-op
+    assert_eq!(e.land("r", &draft, "main", &|_| Ok(())).unwrap(), tip);
+    assert!(cambium_core::engine::valid_ref_name("main") && cambium_core::engine::valid_ref_name("release/2026.11"));
+    assert!(
+        !cambium_core::engine::valid_ref_name("feature/x")
+            && !cambium_core::engine::valid_ref_name("release/")
+            && !cambium_core::engine::valid_ref_name("release/../x")
+    );
 }
 
 #[test]

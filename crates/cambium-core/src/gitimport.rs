@@ -180,6 +180,12 @@ impl Engine {
             } else {
                 format!("tags/{}", f[0].trim_start_matches("refs/tags/"))
             };
+            if !crate::engine::valid_ref_name(&name) {
+                // Scion's model: only main and release branches; the commits stay
+                // imported (reachable by id), only the ref is not created
+                rep.skipped.push(format!("ref {name} (only main and release/* refs are imported)"));
+                continue;
+            }
             let Some(cs) = cs_of.get(target) else {
                 rep.skipped.push(format!("ref {name} (points at a non-commit)"));
                 continue;

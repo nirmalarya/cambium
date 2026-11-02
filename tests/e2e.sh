@@ -32,23 +32,22 @@ ok "F05 log" '[ $(cmb log | wc -l) = 3 ]'
 ok "F05 log path filter" '[ $(cmb log docs | wc -l) = 1 ]'
 ok "F05 blame" 'cmb blame src/lib.rs | sed -n 2p | grep -q "$(cmb log -n 1 | cut -c1-12)"'
 ok "F05 diff between revisions" 'cmb diff --from $(cmb log | sed -n 2p | cut -c1-12) --to main | grep -q inserted'
-ok "F03 branch create" 'cmb branch feat'
-echo "feature" > docs/feature.md; cmb add docs >/dev/null
-ok "F03 commit on branch" 'cmb commit -m "feature doc"'
-ok "F03 branch list" 'cmb branch | grep -q "\* feat"'
-ok "F03 switch to main drops branch file" 'cmb switch main && [ ! -e docs/feature.md ]'
-echo "main change" > docs/main.md; cmb add docs >/dev/null; cmb commit -m "main doc" >/dev/null
-ok "F03 merge" 'cmb merge feat && [ -e docs/feature.md ] && cmb log -n 1 | grep -q "(merge)"'
-cmb switch feat >/dev/null 2>&1
-echo more >> docs/feature.md; cmb add docs >/dev/null; cmb commit -m "more feature" >/dev/null
-ok "F04 rebase" 'cmb rebase main && [ -e docs/main.md ]'
-ok "F04 conflict reported" 'cd .. && cmb checkout demo wc2 --branch main >/dev/null 2>&1 && cd wc2 && echo A > docs/readme.md && cmb add docs && cmb commit -m A && cd ../wc && echo B > docs/readme.md && cmb add docs && cmb commit -m B && cmb switch feat; cmb merge main 2>&1 | grep -qi conflict'
+cmb checkout demo ../wc2 >/dev/null 2>&1
+ok "F03 draft commit leaves main alone" 'echo feature > docs/feature.md && cmb add docs >/dev/null && cmb commit --draft -m "feature doc" | grep -q "^\[draft" && ! cmb cat demo main docs/feature.md >/dev/null 2>&1 && cmb status | grep -q "drafts not landed"'
+REFBODY=$(printf '{"expected":null,"new":"%s"}' "$(cmb log -n 1 | cut -c1-12)")
+ok "F03 only main and release refs can be created" '[ "$(curl -s -o /dev/null -w %{http_code} -H "Authorization: Bearer $CAMBIUM_TOKEN" -H content-type:application/json -d "$REFBODY" $CAMBIUM_SERVER/v1/repos/demo/refs/feat)" = 400 ]'
+(cd ../wc2 && echo "main change" > docs/main.md && cmb add docs >/dev/null && cmb commit -m "main doc" >/dev/null)
+ok "F04 sync rebases drafts onto the new main" 'cmb sync && [ -e docs/main.md ] && [ -e docs/feature.md ] && cmb status | grep -q "drafts not landed"'
+ok "F04 land puts the drafts on main" 'cmb land | grep -q "^\[main" && cmb cat demo main docs/feature.md | grep -q feature && ! cmb status | grep -q drafts'
+ok "F04 commit lands even after main moved (server rebases)" '(cd ../wc2 && cmb sync >/dev/null 2>&1 && echo q > docs/q.md && cmb add docs >/dev/null && cmb commit -m qq >/dev/null) && echo r > docs/r.md && cmb add docs >/dev/null && cmb commit -m rr | grep -q "^\[main" && [ -e docs/q.md ]'
+ok "F03 release branch, fix, merge back into main" 'cmb branch 1 | grep -q "created release/1" && (cd ../wc2 && cmb sync >/dev/null 2>&1 && cmb switch release/1 >/dev/null 2>&1 && echo fix > docs/fix.md && cmb add docs >/dev/null && cmb commit -m fix >/dev/null && cmb switch main >/dev/null 2>&1) && echo m > docs/m.md && cmb add docs >/dev/null && cmb commit -m m >/dev/null && cmb merge release/1 && [ -e docs/fix.md ] && cmb log -n 1 | grep -q "(merge)"'
+ok "F04 conflict keeps the change as a draft" '(cd ../wc2 && cmb sync >/dev/null 2>&1 && echo A > docs/readme.md && cmb add docs >/dev/null && cmb commit -m A >/dev/null) && echo B > docs/readme.md && cmb add docs >/dev/null && ! cmb commit -m B 2>$T/c.err && grep -q "kept as draft" $T/c.err && grep -q "conflicts with main" $T/c.err'
 cd $T
 ok "F06 sparse checkout fetches only prefix" 'cmb checkout demo sp --sparse src && [ -e sp/src/lib.rs ] && [ ! -e sp/docs ]'
 ok "F06 sparse list" '(cd sp && cmb sparse | grep -q src)'
 ok "F06 sparse widen" '(cd sp && cmb sparse add docs && [ -e docs/readme.md ])'
 ok "F07 API-only read (no working copy)" 'cmb cat demo main src/lib.rs | grep -q inserted'
-ok "F02 stale head rejected with hint" '(cd sp && echo z > src/z.rs && cmb add src && (cd ../wc2 && echo q > docs/q.md && cmb add docs && cmb commit -m q) && cmb commit -m z 2>&1 | grep -q "cmb sync")'
+ok "F02 commit after main moved is rebased, not refused" '(cd sp && echo z > src/z.rs && cmb add src >/dev/null && (cd ../wc2 && cmb sync >/dev/null 2>&1; echo q2 > docs/q2.md && cmb add docs && cmb commit -m q2) >/dev/null 2>&1 && cmb commit -m z | grep -q "^\[main" && [ -e docs/q2.md ])'
 ok "F08 cache bounded" 'CAMBIUM_CACHE_MAX=1 cmb checkout demo tiny >/dev/null 2>&1; [ $(ls $CAMBIUM_CACHE | wc -l) -le 1 ]'
 HEAD_ID=$(curl -s -H "Authorization: Bearer $CAMBIUM_TOKEN" $CAMBIUM_SERVER/v1/repos/demo/resolve/main | python3 -c 'import sys,json; print(json.load(sys.stdin)["cs"])')
 TRAV=$(printf '{"ref":"main","expected":"%s","message":"m","files":[{"path":"../evil","blob":null}]}' "$HEAD_ID")
@@ -67,7 +66,7 @@ ok "M02 chmod -x shows as mode change in status" '(cd mx && chmod -x run.sh && c
 ok "M02 chmod shows in worktree diff without content hunk" '(cd mx && cmb diff | grep -q "^mode run.sh: 100755 -> 100644" && ! cmb diff | grep -q "^@@")'
 ok "M02 mode-only commit and revision diff" '(cd mx && cmb add run.sh && cmb commit -m "not exec" && cmb diff --from $(cmb log | sed -n 2p | cut -c1-12) --to main | grep -q "100755 -> 100644")'
 ok "M03 sync applies mode change to other copy" '(cd wc2 && cmb sync && [ ! -x run.sh ])'
-ok "M04 merge keeps exec bit from branch" '(cd mx && cmb branch xbit >/dev/null && chmod +x run.sh && cmb add run.sh && cmb commit -m "exec again" && cmb switch main && echo extra > docs/extra.md && cmb add docs && cmb commit -m extra && cmb merge xbit && [ -x run.sh ])'
+ok "M04 merge keeps exec bit from a release branch" '(cd mx && cmb branch xbit >/dev/null && cmb switch release/xbit >/dev/null 2>&1 && chmod +x run.sh && cmb add run.sh && cmb commit -m "exec again" && cmb switch main && echo extra > docs/extra.md && cmb add docs && cmb commit -m extra && cmb merge release/xbit && [ -x run.sh ])'
 ok "M05 symlink committed and restored as a link" '(cd mx && ln -s docs/readme.md latest && cmb status | grep -q "latest (symlink)" && cmb add latest && cmb commit -m link) && cmb checkout demo ml >/dev/null 2>&1 && [ -L ml/latest ] && [ "$(readlink ml/latest)" = docs/readme.md ]'
 ok "M05 retargeted symlink shows in diff" '(cd ml && ln -sfn src/lib.rs latest && cmb diff | grep -q "^+src/lib.rs")'
 # ---------- resumable fetch ----------
@@ -107,9 +106,9 @@ cd $T
 cmb init rev rv >/dev/null 2>&1; cd rv; echo base > a.txt; cmb add a.txt >/dev/null; cmb commit -m base >/dev/null
 ok "W01 owner protects main (1 approval)" 'cmb protect main 1 && cmb protect | grep -q "main .*1 approval"'
 echo direct >> a.txt; cmb add a.txt >/dev/null
-ok "W02 direct commit to protected main refused" 'cmb commit -m direct 2>&1 | grep -q "main is protected"'
+ok "W02 commit to protected main is kept as a draft" '! cmb commit -m direct 2>$T/w2 && grep -q "only changes through an approved review" $T/w2 && cmb status | grep -q "drafts not landed"'
 ok "W03 non-admin cannot change protection" '! CAMBIUM_TOKEN=$BOB cmb protect main 0'
-ok "W04 review opened from a branch" 'cmb branch feat >/dev/null 2>&1 && cmb commit -m "<b>feature</b>" >/dev/null && cmb review create -m "<script>alert(1)</script> add line" | grep -q "review #1 opened: feat -> main"'
+ok "W04 review opened from the drafts" 'cmb review create -m "<script>alert(1)</script> add line" | grep -q "review #1 opened: [0-9a-f]* -> main"'
 ok "W05 author cannot approve own review" 'cmb review approve 1 2>&1 | grep -q "cannot approve their own"'
 ok "W06 merge blocked until approved" 'cmb review merge 1 2>&1 | grep -q "needs 1 approval"'
 U=$CAMBIUM_SERVER/ui
@@ -125,7 +124,7 @@ CSRF=$(grep -o 'name=csrf value="[0-9a-f]*"' $T/rv.html | head -1 | grep -o '[0-
 ok "W12 UI action without CSRF value refused" '[ "$(curl -s -o /dev/null -w %{http_code} -b "$CK" -d csrf=bad $U/rev/reviews/1/approve)" = 403 ]'
 ok "W13 UI comment" '[ "$(curl -s -o /dev/null -w %{http_code} -b "$CK" --data-urlencode "csrf=$CSRF" --data-urlencode "body=nice <i>work</i>" $U/rev/reviews/1/comments)" = 303 ] && curl -s -b "$CK" $U/rev/reviews/1 | grep -q "nice &lt;i&gt;work&lt;/i&gt;"'
 ok "W14 UI approve" '[ "$(curl -s -o /dev/null -w %{http_code} -b "$CK" -d csrf=$CSRF $U/rev/reviews/1/approve)" = 303 ] && curl -s -b "$CK" $U/rev/reviews/1 | grep -q "<b>1/1</b>"'
-ok "W15 UI merge lands the review on main" '[ "$(curl -s -o /dev/null -w %{http_code} -b "$CK" -d csrf=$CSRF $U/rev/reviews/1/merge)" = 303 ] && cmb review list | grep -q "^#1 *merged" && cmb switch main >/dev/null 2>&1 && grep -q direct a.txt'
+ok "W15 UI merge lands the review on main" '[ "$(curl -s -o /dev/null -w %{http_code} -b "$CK" -d csrf=$CSRF $U/rev/reviews/1/merge)" = 303 ] && cmb review list | grep -q "^#1 *merged" && cmb sync >/dev/null 2>&1 && grep -q direct a.txt && ! cmb status | grep -q drafts'
 ok "W16 review show (CLI) includes the comment" 'cmb review show 1 | grep -q "bob: nice"'
 ok "W17 UI cookie holds a server-side session id, never the API token" 'echo "$CK" | grep -q "^cambium_session=cmbs_" && ! grep -qi "$BOB" $T/h'
 ok "W18 UI sends security headers" 'curl -s -D - -o /dev/null -b "$CK" $U/rev | tr -d "\r" | grep -qi "^content-security-policy: default-src .none." && curl -s -D - -o /dev/null $U/login | grep -qi "^x-frame-options: DENY"'
@@ -164,7 +163,7 @@ G=$T/gitsrc; mkdir -p $G && cd $G && git init -q -b main . && git config user.na
 mkdir -p lib && echo one > lib/a.txt && printf '#!/bin/sh\n' > tool.sh && chmod +x tool.sh && git add -A && git commit -qm one
 git checkout -qb topic && echo two >> lib/a.txt && git commit -qam two && git checkout -q main && echo b > b.txt && git add b.txt && git commit -qm three && git merge -q --no-ff -m merged topic
 cd $T
-ok "I01 cmbd import-git imports every commit and ref" '$BIN/cmbd import-git $G gitimp alice 2>/dev/null | grep -q "imported 4 commits .* refs: main, topic"'
+ok "I01 cmbd import-git imports every commit; refs only main and release/*" '$BIN/cmbd import-git $G gitimp alice 2>/dev/null > $T/imp.out; grep -q "imported 4 commits .* refs: main" $T/imp.out && ! grep -q "refs: main, topic" $T/imp.out'
 ok "I02 imported tree matches the Git checkout" 'cmb checkout gitimp gi >/dev/null 2>&1 && diff -r --exclude=.cambium --exclude=.git $G $T/gi && [ -x $T/gi/tool.sh ]'
 ok "I03 imported history and merge parents" '(cd $T/gi && cmb log | head -1 | grep -q "merged (merge)" && [ $(cmb log | wc -l) = 5 ])'
 ok "I04 blame works on imported history" '(cd $T/gi && [ $(cmb blame lib/a.txt | cut -d" " -f1 | sort -u | wc -l) = 2 ])'

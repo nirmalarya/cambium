@@ -199,8 +199,8 @@ fn backup_restore_round_trip() {
     e.set_acl("r", &Principal::new("alice"), "b", "user:bob", Some(cambium_core::engine::Perm::Read)).unwrap();
     e.create_token("alice").unwrap();
     e.audit(ev("admin.backup")).unwrap();
-    e.cas_ref("r", "feat", None, Some(&root)).unwrap();
-    let id = e.create_review("r", "feat", "main", "t", "alice").unwrap();
+    let draft = e.create_changeset("r", vec![c.id.clone()], "alice", "draft", vec![put(&e, "d.txt", "d\n")]).unwrap();
+    let id = e.create_review("r", &draft.id, "main", "t", "alice").unwrap();
     e.comment("r", id, "bob", None, "hi").unwrap();
     let rep = e.backup(&d.path().join("bk")).unwrap();
     assert!(rep.rows > 0 && rep.blobs >= 2);

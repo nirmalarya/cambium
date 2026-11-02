@@ -66,12 +66,15 @@ impl Engine {
         Ok(())
     }
 
+    /// Open a review of changeset `source` (any revision; stored as its changeset id)
+    /// to land on ref `target`.
     pub fn create_review(&self, repo: &str, source: &str, target: &str, title: &str, author: &str) -> Result<i64> {
-        if source == target {
-            return Err(Error::Bad("source and target must differ".into()));
+        let source = self.resolve(repo, source)?;
+        let t = self.get_ref(repo, target)?.ok_or_else(|| Error::NotFound(format!("ref {target}")))?;
+        if self.is_ancestor(repo, &source, &t)? {
+            return Err(Error::Bad(format!("{} is already in {target}", &source[..12])));
         }
-        self.get_ref(repo, source)?.ok_or_else(|| Error::NotFound(format!("ref {source}")))?;
-        self.get_ref(repo, target)?.ok_or_else(|| Error::NotFound(format!("ref {target}")))?;
+        let source = source.as_str();
         let title = title.trim();
         if title.is_empty() || title.len() > 200 {
             return Err(Error::Bad("title must be 1..200 characters".into()));
@@ -90,7 +93,7 @@ impl Engine {
             .db
             .one("SELECT id,repo,source,target,title,author,state,created_at FROM reviews WHERE repo=?1 AND id=?2", p![repo, id])?
             .ok_or_else(|| Error::NotFound(format!("review {id}")))?;
-        let head = self.get_ref(repo, &r.s(2))?.unwrap_or_default();
+        let head = r.s(2); // the changeset under review
         let approvals = self
             .db
             .query(
@@ -165,9 +168,23 @@ impl Engine {
         if rv.author == user {
             return Err(Error::Forbidden("authors cannot approve their own review".into()));
         }
-        let head = self.get_ref(repo, &rv.source)?.ok_or_else(|| Error::NotFound(format!("ref {}", rv.source)))?;
+        let head = rv.source.clone();
         self.db.exec("INSERT INTO review_approvals(review_id,user_name,head,created_at,groups) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(review_id,user_name) DO UPDATE SET head=excluded.head, created_at=excluded.created_at, groups=excluded.groups",
             p![id, user, head, now(), who.groups.join(",")])?;
+        Ok(())
+    }
+    /// Point the review at a new changeset (a revised version). Approvals given on the
+    /// previous changeset no longer count.
+    pub fn update_review(&self, repo: &str, id: i64, who: &str, cs: &str) -> Result<()> {
+        let rv = self.review(repo, id)?;
+        if rv.author != who {
+            return Err(Error::Forbidden("only the author can update a review".into()));
+        }
+        if rv.state != "open" {
+            return Err(Error::Bad(format!("review is {}", rv.state)));
+        }
+        let cs = self.resolve(repo, cs)?;
+        self.db.exec("UPDATE reviews SET source=?1 WHERE id=?2", p![cs, id])?;
         Ok(())
     }
     pub fn close_review(&self, repo: &str, id: i64, who: &str) -> Result<()> {
@@ -196,8 +213,8 @@ impl Engine {
         if !rv.owners_pending.is_empty() {
             return Err(Error::Forbidden(format!("code-owner approval missing: {}", rv.owners_pending.join("; "))));
         }
-        // merge the exact head the approvals were counted on, not whatever the branch is now
-        let head = self.get_ref(repo, &rv.source)?.ok_or_else(|| Error::NotFound(format!("ref {}", rv.source)))?;
+        // land the exact changeset the approvals were counted on
+        let head = rv.source.clone();
         let n = self
             .db
             .one("SELECT count(*) FROM review_approvals WHERE review_id=?1 AND head=?2 AND user_name<>?3", p![id, &head, &rv.author])?
@@ -206,10 +223,10 @@ impl Engine {
         if n < rv.required {
             return Err(Error::Forbidden("source moved while merging; approvals are stale".into()));
         }
-        let cs = self.merge_checked(repo, &rv.target, &head, who, check)?;
-        let _ = n;
+        let _ = who;
+        let tip = self.land(repo, &head, &rv.target, check)?;
         self.db.exec("UPDATE reviews SET state='merged' WHERE id=?1", p![id])?;
-        Ok(cs)
+        self.get_changeset(repo, &tip)
     }
 }
 
@@ -260,7 +277,8 @@ impl Engine {
         if rv.state != "open" {
             return Ok(vec![]);
         }
-        let (Some(t), Some(s)) = (self.get_ref(&rv.repo, &rv.target)?, self.get_ref(&rv.repo, &rv.source)?) else { return Ok(vec![]) };
+        let Some(t) = self.get_ref(&rv.repo, &rv.target)? else { return Ok(vec![]) };
+        let s = rv.source.clone();
         let mt = self.manifest(&rv.repo, &t)?;
         if !mt.keys().any(|k| k == "OWNERS" || k.ends_with("/OWNERS")) {
             return Ok(vec![]);
