@@ -75,7 +75,7 @@ jobs:
       FUZZ_TOOLCHAIN: nightly-2026-10-28
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - run: rustup toolchain install $FUZZ_TOOLCHAIN --profile minimal && cargo +$FUZZ_TOOLCHAIN install cargo-fuzz --version 0.12.0 --locked
+      - run: rustup toolchain install $FUZZ_TOOLCHAIN --profile minimal && cargo +$FUZZ_TOOLCHAIN install cargo-fuzz --version 0.13.2 --locked
       - name: fuzz each target for 60 s
         run: |
           cd fuzz
