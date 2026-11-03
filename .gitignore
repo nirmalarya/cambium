@@ -1,3 +1,5 @@
 target/
 cambium-data/
 .env
+__pycache__/
+*.pyc

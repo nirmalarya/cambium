@@ -40,12 +40,31 @@ approvals if an admin set it up (`cmb protect main 2 --trivial 1`). The review s
 (`docs`, `comments` or `logic`); anything uncertain counts as `logic`.
 
 ## Resolve a conflict
-```sh
-cmb sync          # rebases your drafts; reports the conflicting files
-# edit the files, then
-cmb add <files> && cmb commit --draft -m "resolve conflict"
-cmb land          # or update your review
+When your drafts and the branch changed the same lines, `cmb sync` moves your working copy
+to the latest head and puts your drafts' changes back as local edits. Where both sides
+edited the same lines it writes markers, the way git does:
+
 ```
+<<<<<<< your drafts
+retries = 5
+=======
+retries = 3
+>>>>>>> main (3f9b0c11a2e4)
+```
+
+```sh
+cmb sync                      # lists each file and how many conflicts it has
+# edit the files: keep what is right, delete the marker lines
+cmb add <files>
+cmb commit -m "retry webhook on 503"            # lands it
+# or, for a protected branch:
+cmb commit --draft -m "retry webhook on 503" && cmb review update <n>   # or `cmb review create`
+```
+
+`cmb commit` refuses files that still contain conflict markers (`--allow-markers` if they are
+meant to be there). Files that are not text (binaries, links), or that one side deleted, are
+listed too; your version is left in place. If you also have uncommitted edits, `cmb sync`
+asks you to commit them as a draft first, so nothing is overwritten.
 
 ## Undo something that landed
 ```sh

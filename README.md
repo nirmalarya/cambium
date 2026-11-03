@@ -63,9 +63,17 @@ is not affiliated with or endorsed by Anthropic. Earlier prior art includes Meta
 [Sapling](https://github.com/facebook/sapling) server, Google's Piper, and CVS, Subversion and Perforce.
 
 ## Known issues
-Cambium is early alpha: the security and data-integrity fixes from the first review have landed,
-but it has not had an independent security review, and storage still keeps a full file list per
-changeset (being replaced by content-hashed trees). Do not use it for production data yet.
+Cambium is a pilot. Everything in the published design is implemented and tested (unit,
+property, fuzzing, deterministic simulation, end-to-end, Postgres + S3 integration), and an
+independent automated security review found issues that are all fixed
+([security model](docs/security-model.md)). Before production use it still needs:
+
+- a penetration test by people, not tools;
+- a load test at your target scale on real servers ([performance](docs/performance.md) has
+  the method and single-machine numbers);
+- your own restore drill (`cmbd backup` / `cmbd restore`, see [admin](docs/guide/admin.md)).
+
+Bugs found and fixed so far are listed in [docs/bugs.md](docs/bugs.md).
 
 ## License
 [MIT](LICENSE)

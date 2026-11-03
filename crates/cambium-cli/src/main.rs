@@ -59,6 +59,30 @@ struct Client {
     token: String,
 }
 
+/// Stop with a readable `cmb:` message instead of a panic.
+trait Must<T> {
+    fn must(self, what: &str) -> T;
+}
+impl<T, E: std::fmt::Display> Must<T> for Result<T, E> {
+    fn must(self, what: &str) -> T {
+        self.unwrap_or_else(|e| die(format!("{what}: {e}")))
+    }
+}
+impl<T> Must<T> for Option<T> {
+    fn must(self, what: &str) -> T {
+        self.unwrap_or_else(|| die(what))
+    }
+}
+/// A string field of a server reply; a missing one means the reply is not what this
+/// client understands (wrong server, proxy page, newer API), so say that plainly.
+fn js<'a>(v: &'a Value, k: &str) -> &'a str {
+    v[k].as_str()
+        .unwrap_or_else(|| die(format!("unexpected reply from server (no `{k}`); is CAMBIUM_SERVER a Cambium server of this version?")))
+}
+fn arr<'a>(v: &'a Value, k: &str) -> &'a Vec<Value> {
+    v[k].as_array().unwrap_or_else(|| die(format!("unexpected reply from server (no `{k}` list)")))
+}
+
 fn die(msg: impl AsRef<str>) -> ! {
     eprintln!("cmb: {}", msg.as_ref());
     exit(1)
@@ -95,7 +119,10 @@ impl Client {
     fn handle(r: Result<ureq::Response, ureq::Error>) -> Value {
         match r {
             Ok(resp) => resp.into_json().unwrap_or(Value::Null),
-            Err(ureq::Error::Status(_, resp)) => die(err_message(&resp.into_json().unwrap_or(Value::Null))),
+            Err(ureq::Error::Status(code, resp)) => match resp.into_json::<Value>() {
+                Ok(v) if v.get("error").is_some() => die(err_message(&v)),
+                _ => die(format!("server answered HTTP {code} without a Cambium error (a proxy or the wrong server?)")),
+            },
             Err(e) => die(format!("cannot reach server: {e}")),
         }
     }
@@ -164,7 +191,7 @@ impl Client {
     }
     fn put_blob(&self, data: &[u8]) -> String {
         let v = Self::handle(Self::send(|| self.auth(http().post(&format!("{}/v1/blobs", self.server))).send_bytes(data)));
-        v["id"].as_str().unwrap().to_string()
+        js(&v, "id").to_string()
     }
     /// Fetch a blob into the cache, resuming from a partial download if one exists.
     /// Bytes are appended to `<cache>-partial/<id>` as they arrive; a dropped connection
@@ -179,7 +206,7 @@ impl Client {
         }
         NET_FETCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let pdir = partial_dir();
-        std::fs::create_dir_all(&pdir).unwrap();
+        std::fs::create_dir_all(&pdir).must("cannot create the download folder");
         let part = pdir.join(id);
         let chunk: u64 = std::env::var("CAMBIUM_FETCH_CHUNK").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
         // test hook: stop after N range requests, as if the process were killed mid-fetch
@@ -222,9 +249,9 @@ impl Client {
                 None
             };
             let mut f = if resp.status() == 206 {
-                std::fs::OpenOptions::new().create(true).append(true).open(&part).unwrap()
+                std::fs::OpenOptions::new().create(true).append(true).open(&part).must("cannot open a partial download")
             } else {
-                std::fs::File::create(&part).unwrap()
+                std::fs::File::create(&part).must("cannot write a partial download")
             }; // server sent the whole thing
             let mut rd = resp.into_reader();
             let mut buf = [0u8; 64 * 1024];
@@ -232,7 +259,7 @@ impl Client {
             loop {
                 match rd.read(&mut buf) {
                     Ok(0) => break,
-                    Ok(n) => f.write_all(&buf[..n]).unwrap(),
+                    Ok(n) => f.write_all(&buf[..n]).must("cannot write a partial download (disk full?)"),
                     Err(e) => {
                         eprintln!("cmb: fetch of {} interrupted: {e}; resuming", short(id));
                         broke = true;
@@ -254,7 +281,7 @@ impl Client {
             }
             break;
         }
-        let buf = std::fs::read(&part).unwrap();
+        let buf = std::fs::read(&part).must("cannot read a finished download");
         let _ = std::fs::remove_file(&part);
         if hex::encode(Sha256::digest(&buf)) != id {
             die(format!("blob {id} failed integrity check (partial discarded; rerun)"));
@@ -404,7 +431,7 @@ fn cache_put(id: &str, data: &[u8]) {
 
 // ---------- working copy ----------
 fn find_root() -> PathBuf {
-    let mut d = std::env::current_dir().unwrap();
+    let mut d = std::env::current_dir().must("cannot read the current folder");
     loop {
         if d.join(".cambium/state.json").exists() || mount_meta(&d).join("state.json").exists() {
             return d;
@@ -429,14 +456,15 @@ pub(crate) fn meta(root: &Path) -> PathBuf {
     }
 }
 fn load(root: &Path) -> State {
-    serde_json::from_slice(&std::fs::read(meta(root).join("state.json")).unwrap()).unwrap()
+    let raw = std::fs::read(meta(root).join("state.json")).must("cannot read .cambium/state.json");
+    serde_json::from_slice(&raw).must(".cambium/state.json is damaged; check out again")
 }
 fn save(root: &Path, s: &State) {
     let m = meta(root);
-    std::fs::create_dir_all(&m).unwrap();
+    std::fs::create_dir_all(&m).must("cannot write .cambium");
     let tmp = m.join("state.json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(s).unwrap()).unwrap();
-    std::fs::rename(tmp, m.join("state.json")).unwrap();
+    std::fs::write(&tmp, serde_json::to_vec_pretty(s).must("cannot encode state")).must("cannot write .cambium/state.json (disk full?)");
+    std::fs::rename(tmp, m.join("state.json")).must("cannot write .cambium/state.json");
 }
 fn in_sparse(s: &State, p: &str) -> bool {
     s.sparse.is_empty()
@@ -529,11 +557,11 @@ fn write_entry(c: &Client, root: &Path, p: &str, e: &str) {
         #[cfg(unix)]
         {
             use std::os::unix::ffi::OsStrExt;
-            std::os::unix::fs::symlink(std::ffi::OsStr::from_bytes(&data), &fp).unwrap();
+            std::os::unix::fs::symlink(std::ffi::OsStr::from_bytes(&data), &fp).must(&format!("cannot create link {p}"));
         }
         return;
     }
-    std::fs::write(&fp, data).unwrap();
+    std::fs::write(&fp, data).must(&format!("cannot write {p} (disk full?)"));
     set_mode(&fp, mode);
 }
 fn walk(root: &Path, dir: &Path, out: &mut Vec<String>) {
@@ -550,13 +578,13 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<String>) {
     }
 }
 fn rel(root: &Path, arg: &str) -> String {
-    let abs = std::env::current_dir().unwrap().join(arg);
+    let abs = std::env::current_dir().must("cannot read the current folder").join(arg);
     // canonicalise the parent only, so a symlink argument names the link, not its target
     let abs = match (abs.parent(), abs.file_name()) {
         (Some(d), Some(n)) if n != ".." && n != "." => d.canonicalize().map(|d| d.join(n)).unwrap_or(abs.clone()),
         _ => abs.canonicalize().unwrap_or(abs.clone()),
     };
-    let root = root.canonicalize().unwrap();
+    let root = root.canonicalize().must("cannot resolve the working copy folder");
     abs.strip_prefix(&root).unwrap_or_else(|_| die(format!("{arg} is outside the working copy"))).to_string_lossy().replace('\\', "/")
 }
 
@@ -629,7 +657,7 @@ type Fetched = (String, BTreeMap<String, String>, BTreeMap<String, String>, BTre
 fn fetch_tree_sized(c: &Client, s: &State, target: &str) -> Fetched {
     let mut sizes = BTreeMap::new();
     let r = c.get(&format!("/v1/repos/{}/root/{target}", s.repo), &[]);
-    let (cs, root) = (r["cs"].as_str().unwrap().to_string(), r["root"].as_str().unwrap().to_string());
+    let (cs, root) = (js(&r, "cs").to_string(), js(&r, "root").to_string());
     let reuse = s.trees_sparse == s.sparse;
     let in_scope_dir = |d: &str| {
         s.sparse.is_empty()
@@ -659,20 +687,20 @@ fn fetch_tree_sized(c: &Client, s: &State, target: &str) -> Fetched {
         for chunk in want.chunks(1000) {
             let items: Vec<Value> = chunk.iter().map(|(d, i)| json!({"id": i, "path": d})).collect();
             let r = c.post(&format!("/v1/repos/{}/trees", s.repo), json!({"items": items}));
-            for t in r["trees"].as_array().unwrap() {
+            for t in arr(&r, "trees") {
                 TREES_FETCHED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let (dir, id) = (t["path"].as_str().unwrap().to_string(), t["id"].as_str().unwrap().to_string());
+                let (dir, id) = (js(t, "path").to_string(), js(t, "id").to_string());
                 if t.get("error").is_some() {
                     continue; // not visible to this caller
                 }
                 if t["complete"] == true {
                     trees.insert(dir.clone(), id);
                 }
-                for e in t["entries"].as_array().unwrap() {
-                    let name = e["name"].as_str().unwrap();
+                for e in arr(t, "entries") {
+                    let name = js(e, "name");
                     let p = if dir.is_empty() { name.to_string() } else { format!("{dir}/{name}") };
-                    let eid = e["id"].as_str().unwrap().to_string();
-                    match e["kind"].as_str().unwrap() {
+                    let eid = js(e, "id").to_string();
+                    match js(e, "kind") {
                         "tree" => {
                             if in_scope_dir(&p) {
                                 next.push((p, eid));
@@ -741,7 +769,7 @@ fn materialise(c: &Client, root: &Path, s: &mut State, target: &str) {
     s.files = entries;
     s.trees = trees;
     s.trees_sparse = s.sparse.clone();
-    s.head = t["cs"].as_str().unwrap().to_string();
+    s.head = js(&t, "cs").to_string();
     eprintln!("at {} ({} files fetched, {} removed, {} tracked)", short(&s.head), fetched, removed, s.files.len());
     if std::env::var("CAMBIUM_STATS").is_ok() {
         eprintln!(
@@ -765,11 +793,11 @@ fn take_flag(args: &mut Vec<String>, name: &str) -> bool {
 /// Land the draft stack on the working copy's branch. If the branch is protected or
 /// the drafts conflict with it, they stay drafts and the user is told what to do.
 fn land_drafts(c: &Client, root: &Path, s: &mut State, what: &str) {
-    let d = s.drafts.clone().expect("drafts");
+    let d = s.drafts.clone().must("no drafts to land");
     let (repo, b) = (s.repo.clone(), s.branch.clone());
     match c.post_idem_try(&format!("/v1/repos/{repo}/land"), json!({"cs": d, "onto": b})) {
         Ok(v) => {
-            let tip = v["cs"].as_str().unwrap().to_string();
+            let tip = js(&v, "cs").to_string();
             s.drafts = None;
             if tip != s.head {
                 // the server rebased onto newer work: lay out the landed result
@@ -790,6 +818,84 @@ fn land_drafts(c: &Client, root: &Path, s: &mut State, what: &str) {
             std::process::exit(2);
         }
     }
+}
+/// `cmb sync` when the drafts clash with the branch head: lay out the head, re-apply
+/// what the drafts changed as local edits, and write git-style conflict markers where
+/// both sides edited the same lines. The drafts are left behind on the server; the
+/// person resolves, then commits again (`cmb commit` or `cmb commit --draft`).
+fn sync_with_conflicts(c: &Client, root: &Path, s: &mut State, drafts: &str, branch: &str) {
+    if !changes(root, s).is_empty() {
+        die("your drafts conflict with the branch, and you also have uncommitted changes: commit them as a draft (`cmb commit --draft`) first, then `cmb sync` again");
+    }
+    let repo = s.repo.clone();
+    let head = js(&c.get(&format!("/v1/repos/{repo}/resolve/{branch}"), &[]), "cs").to_string();
+    let mb = c.get(&format!("/v1/repos/{repo}/merge-base"), &[("a", drafts), ("b", &head)]);
+    let base = js(&mb, "base").to_string();
+    // full listings of the three sides (inside the sparse set)
+    let probe = State { repo: repo.clone(), sparse: s.sparse.clone(), ..Default::default() };
+    let side = |rev: &str| fetch_tree(c, &probe, rev).1;
+    let (mb, md, mh) = (side(&base), side(drafts), side(&head));
+    materialise(c, root, s, &head);
+    s.drafts = None;
+    save(root, s);
+    let text = |e: Option<&String>| -> Option<String> {
+        match e {
+            None => Some(String::new()),
+            Some(e) if split_entry(e).1 == MODE_LINK => None,
+            Some(e) => String::from_utf8(c.get_blob(split_entry(e).0)).ok().filter(|t| !t.contains('\0')),
+        }
+    };
+    let theirs_label = format!("{branch} ({})", short(&head));
+    let (mut conflicted, mut applied) = (vec![], 0);
+    let mut paths: Vec<&String> = md.keys().chain(mb.keys()).collect();
+    paths.sort();
+    paths.dedup();
+    for p in paths {
+        let (b, o, t) = (mb.get(p), md.get(p), mh.get(p));
+        if o == b || o == t {
+            continue; // the drafts did not touch it, or the head already has it
+        }
+        let fp = wc_path(root, p).unwrap_or_else(|e| die(e));
+        if t == b {
+            // only the drafts changed it: take their version
+            match o {
+                Some(e) => write_entry(c, root, p, e),
+                None => {
+                    let _ = std::fs::remove_file(&fp);
+                    remove_empty_parents(root, &fp);
+                }
+            }
+            applied += 1;
+            continue;
+        }
+        // both sides changed it
+        match (o, text(b), text(o), text(t)) {
+            (Some(oe), Some(bt), Some(ot), Some(tt)) if t.is_some() => {
+                let (merged, n) = cambium_core::text::merge3_marked(&bt, &ot, &tt, "your drafts", &theirs_label);
+                std::fs::write(&fp, merged).must(&format!("cannot write {p}"));
+                set_mode(&fp, split_entry(oe).1);
+                if n > 0 {
+                    conflicted.push(format!("{p} ({n} conflict{})", if n == 1 { "" } else { "s" }));
+                } else {
+                    applied += 1;
+                }
+            }
+            (Some(oe), ..) => {
+                // a binary file or link, or deleted on the branch: keep the drafts' version
+                write_entry(c, root, p, oe);
+                let why =
+                    if t.is_none() { "deleted on the branch; your version is in place" } else { "not text; your version is in place" };
+                conflicted.push(format!("{p} ({why})"));
+            }
+            (None, ..) => conflicted.push(format!("{p} (you deleted it; the branch changed it, its version is in place)")),
+        }
+    }
+    eprintln!("cmb: your drafts conflict with {theirs_label}. The working copy is now at {branch}, with your drafts' changes as local edits ({applied} applied cleanly).");
+    eprintln!("Resolve these, then commit again (`cmb commit`, or `cmb commit --draft` for a review):");
+    for c in &conflicted {
+        eprintln!("  {c}");
+    }
+    std::process::exit(2);
 }
 /// Remove now-empty folders between `fp` and the working-copy root.
 fn remove_empty_parents(root: &Path, fp: &Path) {
@@ -821,7 +927,8 @@ Working copies
   cmb init <repo> [dir]                 create a repository and a working copy of it
   cmb checkout <repo> <dir> [--branch B] [--sparse a/,b/]
                                        lay out a working copy (only the listed folders with --sparse)
-  cmb sync                              update to the latest branch head (your drafts are rebased onto it)
+  cmb sync                              update to the latest branch head (your drafts are rebased onto it;
+                                       if they clash, conflict markers are written into the files)
   cmb status / cmb diff [--from R] [--to R] [path]
   cmb sparse [add <prefix> | list]      widen or show the sparse set
   cmb mount <repo> <dir> [--rev R] [--sparse a/,b/] [--write]
@@ -831,6 +938,7 @@ Working copies
 Changes (no feature branches: work is changesets)
   cmb add <path>...                     stage files (deletions too)
   cmb commit -m <msg>                   create a changeset and land it on the branch
+                                       (refuses leftover conflict markers unless --allow-markers)
                                        (if the branch moved, the server rebases; no merge queue)
   cmb commit --draft -m <msg>           create a draft changeset only; stack several
   cmb land                              land your drafts
@@ -881,7 +989,7 @@ fn main() {
             let dir = PathBuf::from(args.get(1).cloned().unwrap_or_else(|| repo.clone()));
             let c = Client::from_env(None);
             c.post("/v1/repos", json!({"name": repo}));
-            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::create_dir_all(&dir).must(&format!("cannot create {}", dir.display()));
             let mut s = State { server: c.server.clone(), repo: repo.clone(), branch: "main".into(), ..Default::default() };
             materialise(&c, &dir, &mut s, "main");
             save(&dir, &s);
@@ -899,7 +1007,7 @@ fn main() {
                 die("already a working copy");
             }
             let c = Client::from_env(None);
-            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::create_dir_all(&dir).must(&format!("cannot create {}", dir.display()));
             let mut s = State { server: c.server.clone(), repo: args[0].clone(), branch: branch.clone(), sparse, ..Default::default() };
             materialise(&c, &dir, &mut s, &branch);
             save(&dir, &s);
@@ -928,8 +1036,8 @@ fn main() {
             let (cs, entries, _, sizes) = fetch_tree_sized(&c, &probe, &rev);
             #[cfg(target_os = "linux")]
             {
-                std::fs::create_dir_all(&args[1]).unwrap();
-                let dir = Path::new(&args[1]).canonicalize().unwrap();
+                std::fs::create_dir_all(&args[1]).must(&format!("cannot create {}", args[1]));
+                let dir = Path::new(&args[1]).canonicalize().must(&format!("cannot resolve {}", args[1]));
                 let err = |e: std::io::Error| die(format!("mount failed: {e} (is /dev/fuse available and fusermount3 installed?)"));
                 if !write {
                     vfs::mount(c, entries, sizes, &dir).unwrap_or_else(err);
@@ -945,7 +1053,7 @@ fn main() {
                     die(format!("{} is already mounted", dir.display()));
                 }
                 let _ = std::fs::remove_dir_all(&m);
-                std::fs::create_dir_all(&m).unwrap();
+                std::fs::create_dir_all(&m).must("cannot create the mount's metadata folder");
                 let s = State {
                     server: c.server.clone(),
                     repo: args[0].clone(),
@@ -955,7 +1063,8 @@ fn main() {
                     files: entries.clone(),
                     ..Default::default()
                 };
-                std::fs::write(m.join("state.json"), serde_json::to_vec_pretty(&s).unwrap()).unwrap();
+                std::fs::write(m.join("state.json"), serde_json::to_vec_pretty(&s).must("cannot encode state"))
+                    .must("cannot write the mount's state");
                 vfs::mount_rw(c, entries, sizes, &dir, &m).unwrap_or_else(err);
                 // unmounted: keep anything not committed, then retire the metadata
                 let left = std::fs::read_dir(m.join("salvage")).map(|d| d.count()).unwrap_or(0);
@@ -991,7 +1100,8 @@ fn main() {
             let c = Client::from_env(None);
             let t = c.post(&format!("/v1/repos/{}/tree", args[0]), json!({"rev": args[1], "prefixes": [args[2]]}));
             let id = t["entries"][&args[2]].as_str().unwrap_or_else(|| die("no such file"));
-            std::io::stdout().write_all(&c.get_blob(split_entry(id).0)).unwrap();
+            let _ = std::io::stdout().write_all(&c.get_blob(split_entry(id).0));
+            // a closed pipe (e.g. `| head`) is fine
         }
         _ => {
             let root = find_root();
@@ -1061,20 +1171,39 @@ fn run_wc(cmd: &str, mut args: Vec<String>, c: &Client, root: &Path, s: &mut Sta
         }
         "commit" => {
             let draft = take_flag(&mut args, "--draft");
-            let msg = flag(&mut args, "-m").unwrap_or_else(|| die("usage: cmb commit -m <message> [--draft]"));
+            let msg = flag(&mut args, "-m").unwrap_or_else(|| die("usage: cmb commit -m <message> [--draft] [--allow-markers]"));
             if s.stage.is_empty() {
                 die("nothing staged (use `cmb add`)");
+            }
+            // left-over conflict markers from `cmb sync` are almost never meant to land
+            if !take_flag(&mut args, "--allow-markers") {
+                let marked: Vec<&String> = s
+                    .stage
+                    .iter()
+                    .filter(|p| {
+                        std::fs::read(root.join(p)).is_ok_and(|d| {
+                            String::from_utf8_lossy(&d).lines().any(|l| l.starts_with("<<<<<<< your drafts") || l.starts_with(">>>>>>> "))
+                                && String::from_utf8_lossy(&d).lines().any(|l| l == "=======")
+                        })
+                    })
+                    .collect();
+                if !marked.is_empty() {
+                    die(format!(
+                        "conflict markers are still in {}; resolve them first (or pass --allow-markers if they are meant to be there)",
+                        marked.iter().map(|p| p.as_str()).collect::<Vec<_>>().join(", ")
+                    ));
+                }
             }
             let mut files = vec![];
             for p in &s.stage {
                 let fp = root.join(p);
-                let blob = if present(&fp) { Some(c.put_blob(&read_content(&fp).unwrap())) } else { None };
+                let blob = if present(&fp) { Some(c.put_blob(&read_content(&fp).must(&format!("cannot read {p}")))) } else { None };
                 files.push(json!({"path": p, "blob": blob, "mode": file_mode(&fp)}));
             }
             // 1. a changeset on top of what this working copy shows; no ref is touched
             let v = c.post_idem(&format!("/v1/repos/{repo}/changesets"), json!({"parent": s.head, "message": msg, "files": files}));
-            for f in v["files"].as_array().unwrap() {
-                let p = f["path"].as_str().unwrap().to_string();
+            for f in arr(&v, "files") {
+                let p = js(f, "path").to_string();
                 let mode = f["mode"].as_u64().unwrap_or(MODE_FILE as u64) as u32;
                 match f["blob"].as_str() {
                     Some(b) => {
@@ -1085,7 +1214,7 @@ fn run_wc(cmd: &str, mut args: Vec<String>, c: &Client, root: &Path, s: &mut Sta
                     }
                 }
             }
-            s.head = v["id"].as_str().unwrap().into();
+            s.head = js(&v, "id").into();
             s.drafts = Some(s.head.clone());
             s.stage.clear();
             if draft {
@@ -1106,9 +1235,9 @@ fn run_wc(cmd: &str, mut args: Vec<String>, c: &Client, root: &Path, s: &mut Sta
         }
         "branch" => match args.first() {
             None => {
-                for r in c.get(&format!("/v1/repos/{repo}/refs"), &[]).as_array().unwrap() {
-                    let n = r["name"].as_str().unwrap();
-                    println!("{} {} {}", if n == s.branch { "*" } else { " " }, n, short(r["cs"].as_str().unwrap()));
+                for r in c.get(&format!("/v1/repos/{repo}/refs"), &[]).as_array().must("unexpected reply from server (expected a list)") {
+                    let n = js(r, "name");
+                    println!("{} {} {}", if n == s.branch { "*" } else { " " }, n, short(js(r, "cs")));
                 }
             }
             Some(name) => {
@@ -1131,8 +1260,15 @@ fn run_wc(cmd: &str, mut args: Vec<String>, c: &Client, root: &Path, s: &mut Sta
             // drafts are rebased onto the latest head on the server, then laid out here
             Some(d) => {
                 let b = s.branch.clone();
-                let v = c.post(&format!("/v1/repos/{repo}/rebase"), json!({"cs": d, "onto": b}));
-                let tip = v["cs"].as_str().unwrap().to_string();
+                let v = match c.post_idem_try(&format!("/v1/repos/{repo}/rebase"), json!({"cs": d, "onto": b})) {
+                    Ok(v) => v,
+                    Err(e) if e["error"] == "merge_conflict" => {
+                        sync_with_conflicts(c, root, s, &d, &b);
+                        return;
+                    }
+                    Err(e) => die(err_message(&e)),
+                };
+                let tip = js(&v, "cs").to_string();
                 materialise(c, root, s, &tip);
                 // drafts that already landed (e.g. via a review) rebase to the head itself
                 let head = c.get(&format!("/v1/repos/{repo}/resolve/{b}"), &[]);
@@ -1149,7 +1285,7 @@ fn run_wc(cmd: &str, mut args: Vec<String>, c: &Client, root: &Path, s: &mut Sta
                 die("land or discard local changes and drafts before merging");
             }
             let v = c.post_idem(&format!("/v1/repos/{repo}/merge"), json!({"target": s.branch, "source": src}));
-            println!("merged {src} into {} as {}", s.branch, short(v["id"].as_str().unwrap()));
+            println!("merged {src} into {} as {}", s.branch, short(js(&v, "id")));
             let b = s.branch.clone();
             materialise(c, root, s, &b);
         }
@@ -1160,7 +1296,7 @@ fn run_wc(cmd: &str, mut args: Vec<String>, c: &Client, root: &Path, s: &mut Sta
             }
             let b = s.branch.clone();
             let v = c.post_idem(&format!("/v1/repos/{repo}/revert"), json!({"cs": rev, "onto": b}));
-            let tip = v["cs"].as_str().unwrap().to_string();
+            let tip = js(&v, "cs").to_string();
             println!("[{b} {}] reverted {rev}", short(&tip));
             materialise(c, root, s, &b);
         }
@@ -1179,7 +1315,7 @@ fn run_wc(cmd: &str, mut args: Vec<String>, c: &Client, root: &Path, s: &mut Sta
                 if let Some(f) = v["first_bad"].as_str() {
                     break f.to_string();
                 }
-                let next = v["next"].as_str().unwrap().to_string();
+                let next = js(&v, "next").to_string();
                 let Some(cmd) = &run else {
                     println!("test {} next (about {} changesets left); then: cmb bisect <good> <bad>", short(&next), v["span"]);
                     return;
@@ -1207,15 +1343,9 @@ fn run_wc(cmd: &str, mut args: Vec<String>, c: &Client, root: &Path, s: &mut Sta
             if let Some(p) = &path {
                 q.push(("path", p));
             }
-            for cs in c.get(&format!("/v1/repos/{repo}/log"), &q).as_array().unwrap() {
-                let merge = if cs["parents"].as_array().unwrap().len() > 1 { " (merge)" } else { "" };
-                println!(
-                    "{} {:<10} {}{}",
-                    short(cs["id"].as_str().unwrap()),
-                    cs["author"].as_str().unwrap(),
-                    cs["message"].as_str().unwrap(),
-                    merge
-                );
+            for cs in c.get(&format!("/v1/repos/{repo}/log"), &q).as_array().must("unexpected reply from server (expected a list)") {
+                let merge = if arr(cs, "parents").len() > 1 { " (merge)" } else { "" };
+                println!("{} {:<10} {}{}", short(js(cs, "id")), js(cs, "author"), js(cs, "message"), merge);
             }
         }
         "search" => {
@@ -1226,21 +1356,25 @@ fn run_wc(cmd: &str, mut args: Vec<String>, c: &Client, root: &Path, s: &mut Sta
                 die("usage: cmb search <text> [--rev R] [-n N]");
             }
             let hits = c.get(&format!("/v1/repos/{repo}/search"), &[("q", q.as_str()), ("rev", rev.as_str()), ("limit", n.as_str())]);
-            for h in hits.as_array().unwrap() {
+            for h in hits.as_array().must("unexpected reply from server (expected a list)") {
                 if h["line"] == 0 {
-                    println!("{} (path)", h["path"].as_str().unwrap());
+                    println!("{} (path)", js(h, "path"));
                     continue;
                 }
-                println!("{}:{}: {}", h["path"].as_str().unwrap(), h["line"], h["text"].as_str().unwrap());
+                println!("{}:{}: {}", js(h, "path"), h["line"], js(h, "text"));
             }
         }
         "watch" => watch::run(root),
         "blame" => {
             let p = rel(root, args.first().unwrap_or_else(|| die("usage: cmb blame <path>")));
-            for (i, l) in
-                c.get(&format!("/v1/repos/{repo}/blame"), &[("rev", &s.head), ("path", &p)]).as_array().unwrap().iter().enumerate()
+            for (i, l) in c
+                .get(&format!("/v1/repos/{repo}/blame"), &[("rev", &s.head), ("path", &p)])
+                .as_array()
+                .must("unexpected reply from server (expected a list)")
+                .iter()
+                .enumerate()
             {
-                println!("{} {:>4}| {}", short(l["cs"].as_str().unwrap()), i + 1, l["line"].as_str().unwrap());
+                println!("{} {:>4}| {}", short(js(l, "cs")), i + 1, js(l, "line"));
             }
         }
         "diff" => {
@@ -1255,20 +1389,23 @@ fn run_wc(cmd: &str, mut args: Vec<String>, c: &Client, root: &Path, s: &mut Sta
                     if !prefixes.is_empty() && !prefixes.iter().any(|x| p == *x || p.starts_with(&format!("{x}/"))) {
                         continue;
                     }
-                    let b = h.map(|e| entry(&c.put_blob(&read_content(&root.join(&p)).unwrap()), split_entry(&e).1));
+                    let b =
+                        h.map(|e| entry(&c.put_blob(&read_content(&root.join(&p)).must(&format!("cannot read {p}"))), split_entry(&e).1));
                     ov.insert(p, b);
                 }
                 c.post(&format!("/v1/repos/{repo}/diff"), json!({"from": from.unwrap_or(s.head.clone()), "overlay": ov}))
             };
-            print!("{}", v["diff"].as_str().unwrap());
+            print!("{}", js(&v, "diff"));
         }
         "protect" => {
             // cmb protect <branch> <approvals> [--trivial N|off]   (0 lifts protection); cmb protect = list
             let trivial = flag(&mut args, "--trivial");
             if args.is_empty() {
-                for p in c.get(&format!("/v1/repos/{repo}/protected"), &[]).as_array().unwrap() {
+                for p in
+                    c.get(&format!("/v1/repos/{repo}/protected"), &[]).as_array().must("unexpected reply from server (expected a list)")
+                {
                     let t = p[2].as_i64().map(|t| format!(" ({t} for docs/comment-only changes)")).unwrap_or_default();
-                    println!("{:<20} {} approval(s){t}", p[0].as_str().unwrap(), p[1]);
+                    println!("{:<20} {} approval(s){t}", p[0].as_str().must("unexpected reply from server"), p[1]);
                 }
                 return;
             }
@@ -1301,17 +1438,17 @@ fn run_wc(cmd: &str, mut args: Vec<String>, c: &Client, root: &Path, s: &mut Sta
                     c.post(&format!("/v1/repos/{repo}/reviews/{n}/update"), json!({"cs": src}));
                     println!("review #{n} now at {} (earlier approvals no longer count)", short(&src));
                 }
-                "list" => for r in c.get(&format!("/v1/repos/{repo}/reviews"), &[]).as_array().unwrap() {
-                    println!("#{:<4} {:<7} {:<8} {}/{} {} -> {}  {}  ({})", r["id"], r["state"].as_str().unwrap(), r["kind"].as_str().unwrap_or(""), r["approvals"].as_array().unwrap().len(), r["required"],
-                        r["source"].as_str().unwrap(), r["target"].as_str().unwrap(), r["title"].as_str().unwrap(), r["author"].as_str().unwrap());
+                "list" => for r in c.get(&format!("/v1/repos/{repo}/reviews"), &[]).as_array().must("unexpected reply from server (expected a list)") {
+                    println!("#{:<4} {:<7} {:<8} {}/{} {} -> {}  {}  ({})", r["id"], js(r, "state"), r["kind"].as_str().unwrap_or(""), arr(r, "approvals").len(), r["required"],
+                        js(r, "source"), js(r, "target"), js(r, "title"), js(r, "author"));
                 },
                 "show" => {
                     let v = c.get(&format!("/v1/repos/{repo}/reviews/{}", id(&args)), &[]);
                     let r = &v["review"];
-                    println!("#{} {} [{}]\n{} -> {} by {}; approvals {}/{} {:?}", r["id"], r["title"].as_str().unwrap(), r["state"].as_str().unwrap(),
-                        r["source"].as_str().unwrap(), r["target"].as_str().unwrap(), r["author"].as_str().unwrap(), r["approvals"].as_array().unwrap().len(), r["required"],
-                        r["approvals"].as_array().unwrap().iter().filter_map(|x| x.as_str()).collect::<Vec<_>>());
-                    for cm in v["comments"].as_array().unwrap() { println!("  {}: {}", cm["author"].as_str().unwrap(), cm["body"].as_str().unwrap()); }
+                    println!("#{} {} [{}]\n{} -> {} by {}; approvals {}/{} {:?}", r["id"], js(r, "title"), js(r, "state"),
+                        js(r, "source"), js(r, "target"), js(r, "author"), arr(r, "approvals").len(), r["required"],
+                        arr(r, "approvals").iter().filter_map(|x| x.as_str()).collect::<Vec<_>>());
+                    for cm in arr(&v, "comments") { println!("  {}: {}", js(cm, "author"), js(cm, "body")); }
                     print!("{}", v["diff"].as_str().unwrap_or(""));
                 }
                 "comment" => {
@@ -1321,7 +1458,7 @@ fn run_wc(cmd: &str, mut args: Vec<String>, c: &Client, root: &Path, s: &mut Sta
                     println!("commented on #{n}");
                 }
                 "approve" => { let n = id(&args); let v = c.post(&format!("/v1/repos/{repo}/reviews/{n}/approve"), json!({}));
-                    println!("approved #{n} ({}/{} approvals)", v["approvals"].as_array().unwrap().len(), v["required"]); }
+                    println!("approved #{n} ({}/{} approvals)", arr(&v, "approvals").len(), v["required"]); }
                 "merge" => { let n = id(&args); let v = c.post(&format!("/v1/repos/{repo}/reviews/{n}/merge"), json!({}));
                     println!("merged #{n} as {}", short(v["id"].as_str().unwrap_or("")));
                     // if this working copy held the reviewed drafts, they are now on the branch
@@ -1352,12 +1489,15 @@ fn run_wc(cmd: &str, mut args: Vec<String>, c: &Client, root: &Path, s: &mut Sta
                     .call();
                 match r {
                     Ok(_) => println!("webhook {id} removed"),
-                    Err(ureq::Error::Status(_, resp)) => die(err_message(&resp.into_json().unwrap_or(Value::Null))),
+                    Err(ureq::Error::Status(code, resp)) => match resp.into_json::<Value>() {
+                        Ok(v) if v.get("error").is_some() => die(err_message(&v)),
+                        _ => die(format!("server answered HTTP {code} without a Cambium error (a proxy or the wrong server?)")),
+                    },
                     Err(e) => die(format!("cannot reach server: {e}")),
                 }
             }
             None | Some("list") => {
-                for h in c.get(&format!("/v1/repos/{repo}/hooks"), &[]).as_array().unwrap() {
+                for h in c.get(&format!("/v1/repos/{repo}/hooks"), &[]).as_array().must("unexpected reply from server (expected a list)") {
                     let err = h["last_error"].as_str().map(|e| format!("  last error: {e}")).unwrap_or_default();
                     println!(
                         "{:<4} {}  delivered up to {}  failures {}{err}",
@@ -1389,17 +1529,12 @@ fn run_wc(cmd: &str, mut args: Vec<String>, c: &Client, root: &Path, s: &mut Sta
             }
             _ => {
                 let v = c.get(&format!("/v1/repos/{repo}/acl"), &[]);
-                let rules = v.as_array().unwrap();
+                let rules = v.as_array().must("unexpected reply from server (expected a list)");
                 if rules.is_empty() {
                     println!("(no rules: every signed-in user may read and write)");
                 }
                 for r in rules {
-                    println!(
-                        "/{:<30} {:<24} {}",
-                        r["prefix"].as_str().unwrap(),
-                        r["principal"].as_str().unwrap(),
-                        r["perm"].as_str().unwrap()
-                    );
+                    println!("/{:<30} {:<24} {}", js(r, "prefix"), js(r, "principal"), js(r, "perm"));
                 }
             }
         },
@@ -1441,7 +1576,7 @@ fn http() -> &'static ureq::Agent {
             }
             let cfg = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(rustls::crypto::ring::default_provider()))
                 .with_safe_default_protocol_versions()
-                .unwrap()
+                .must("TLS setup failed")
                 .with_root_certificates(roots)
                 .with_no_client_auth();
             b = b.tls_config(std::sync::Arc::new(cfg));

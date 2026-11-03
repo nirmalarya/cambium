@@ -68,6 +68,45 @@ impl Drop for Cat {
     }
 }
 
+/// The parts of a raw git commit object the import needs.
+struct GitCommit {
+    parents: Vec<String>,
+    /// "Name <email>"
+    author: String,
+    time: i64,
+    message: String,
+}
+/// Parse a raw commit object: header lines (`tree`, `parent`, `author`, ...; a line
+/// starting with a space continues the previous one, e.g. a signature), a blank
+/// line, then the message, which may contain any bytes.
+fn parse_commit(raw: &[u8]) -> Option<GitCommit> {
+    let split = raw.windows(2).position(|w| w == b"\n\n");
+    let (hdr, body) = match split {
+        Some(i) => (&raw[..i], &raw[i + 2..]),
+        None => (raw, &[][..]),
+    };
+    let hdr = String::from_utf8_lossy(hdr);
+    let (mut parents, mut author, mut time) = (vec![], None, 0);
+    for line in hdr.lines().filter(|l| !l.starts_with(' ')) {
+        if let Some(p) = line.strip_prefix("parent ") {
+            parents.push(p.trim().to_string());
+        } else if let Some(a) = line.strip_prefix("author ") {
+            // "Name <email> 1600000000 +0000"
+            let mut it = a.rsplitn(3, ' ');
+            let (_tz, ts, who) = (it.next()?, it.next()?, it.next()?);
+            time = ts.parse().unwrap_or(0);
+            author = Some(who.to_string());
+        }
+    }
+    Some(GitCommit { parents, author: author?, time, message: String::from_utf8_lossy(body).into_owned() })
+}
+
+/// Fuzzing entry point: parse a raw commit object (see `fuzzcheck`).
+#[doc(hidden)]
+pub fn fuzz_parse_commit(raw: &[u8]) -> Option<(usize, String, i64, String)> {
+    parse_commit(raw).map(|c| (c.parents.len(), c.author, c.time, c.message))
+}
+
 fn mode(m: &str) -> Option<u32> {
     match m {
         "100644" | "100664" => Some(MODE_FILE),
@@ -116,26 +155,20 @@ impl Engine {
     ) -> Result<ImportReport> {
         let root = root.to_string();
         let mut rep = ImportReport::default();
-        let log =
-            git(git_dir, &["log", "--topo-order", "--reverse", "--branches", "--tags", "--format=%H%x00%P%x00%an <%ae>%x00%at%x00%B%x1e"])?;
+        // commit ids only (oldest first, parents before children); each commit's
+        // metadata comes from its raw object, so a message may contain any bytes
+        let ids = git(git_dir, &["rev-list", "--topo-order", "--reverse", "--branches", "--tags"])?;
         let mut cat = Cat::new(git_dir)?;
         let mut cs_of: HashMap<String, String> = known;
         let mut blob_of: HashMap<String, String> = HashMap::new();
-        for rec in log.split(|b| *b == 0x1e) {
-            let rec = String::from_utf8_lossy(rec);
-            let rec = rec.trim_start_matches('\n');
-            if rec.is_empty() {
-                continue;
-            }
-            let f: Vec<&str> = rec.splitn(5, '\0').collect();
-            if f.len() < 5 {
-                return Err(Error::Bad("unexpected git log output".into()));
-            }
-            let (sha, parents, author, ts) = (f[0], f[1], f[2], f[3].parse::<i64>().unwrap_or(0));
+        for sha in String::from_utf8_lossy(&ids).lines().map(str::trim).filter(|l| !l.is_empty()) {
             if cs_of.contains_key(sha) {
                 continue; // imported by an earlier run
             }
-            let mut msg = f[4].trim_end().to_string();
+            let c = parse_commit(&cat.get(sha)?).ok_or_else(|| Error::Bad(format!("cannot read git commit {sha}")))?;
+            let (author, ts) = (c.author.as_str(), c.time);
+            let parents = c.parents.join(" ");
+            let mut msg = c.message.trim_end().to_string();
             let gp: Vec<&str> = parents.split_whitespace().collect();
             if gp.len() > 2 {
                 msg.push_str(&format!("\n\n(imported octopus merge; extra parents: {})", gp[2..].join(" ")));

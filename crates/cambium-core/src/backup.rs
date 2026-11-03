@@ -54,6 +54,21 @@ fn from_json(v: &Value) -> Val {
         o => Val::Text(o.to_string()),
     }
 }
+/// SHA-256 of a file, read in chunks (same hex form as `hash_bytes`).
+fn hash_file(p: &Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut f = std::fs::File::open(p)?;
+    let (mut h, mut buf) = (Sha256::new(), vec![0u8; 1 << 16]);
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+    }
+    Ok(hex::encode(h.finalize()))
+}
 fn now() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64
 }
@@ -83,46 +98,49 @@ impl Engine {
             let version = c.one("SELECT max(version) FROM schema_migrations", &[])?.map_or(1, |r| r.i(0));
             let mut out = serde_json::Map::new();
             for (t, cols, order) in TABLES {
-                let rows = c.query(&format!("SELECT {cols} FROM {t} ORDER BY {order}"), &[])?;
+                // rows are written as they arrive: memory stays flat however big the table is
                 let mut f = std::io::BufWriter::new(std::fs::File::create(d.join(format!("{t}.jsonl")))?);
-                for r in &rows {
+                let n = c.each(&format!("SELECT {cols} FROM {t} ORDER BY {order}"), &[], &mut |r| {
                     writeln!(f, "{}", Value::Array(r.0.iter().map(to_json).collect()))?;
-                }
+                    Ok(())
+                })?;
                 f.flush()?;
-                out.insert(t.to_string(), json!({"rows": rows.len()}));
+                out.insert(t.to_string(), json!({"rows": n}));
             }
             Ok((out, version))
         })?;
         let mut rep = Report { schema_version: version, ..Default::default() };
         let mut tables = tables;
         for (t, _, _) in TABLES {
-            let data = std::fs::read(dir.join(format!("{t}.jsonl")))?;
-            let e = tables.get_mut(*t).unwrap();
+            let e = tables.get_mut(*t).ok_or_else(|| Error::Db(format!("table {t} missing from the snapshot")))?;
             rep.rows += e["rows"].as_i64().unwrap_or(0);
-            e["sha256"] = json!(hash_bytes(&data));
+            e["sha256"] = json!(hash_file(&dir.join(format!("{t}.jsonl")))?);
         }
         // blobs referenced by the snapshot (content-addressed and never deleted, so
-        // anything the snapshot points at is still present)
-        let mut ids = std::collections::BTreeSet::new();
+        // anything the snapshot points at is still present). The backup folder itself
+        // is the "already copied" set, so no list of every id is held in memory.
         for t in ["changeset_files", "blob_meta"] {
             let col = if t == "blob_meta" { 0 } else { 2 };
             for line in std::io::BufReader::new(std::fs::File::open(dir.join(format!("{t}.jsonl")))?).lines() {
                 let v: Value = serde_json::from_str(&line?).map_err(|e| Error::Db(e.to_string()))?;
-                if let Some(s) = v[col].as_str() {
-                    ids.insert(s.to_string());
+                let Some(id) = v[col].as_str() else { continue };
+                if id.len() < 3 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    return Err(Error::Db(format!("bad blob id {id:?} in {t}")));
                 }
+                let p = dir.join("blobs").join(&id[..2]);
+                if p.join(id).exists() {
+                    continue;
+                }
+                let data =
+                    self.blobs.get(id)?.ok_or_else(|| Error::Db(format!("blob {id} is referenced but missing from the blob store")))?;
+                if hash_bytes(&data) != id {
+                    return Err(Error::Db(format!("blob {id} is corrupt (hash mismatch)")));
+                }
+                std::fs::create_dir_all(&p)?;
+                std::fs::write(p.join(id), &data)?;
+                rep.blobs += 1;
+                rep.bytes += data.len() as i64;
             }
-        }
-        for id in &ids {
-            let data = self.blobs.get(id)?.ok_or_else(|| Error::Db(format!("blob {id} is referenced but missing from the blob store")))?;
-            if hash_bytes(&data) != *id {
-                return Err(Error::Db(format!("blob {id} is corrupt (hash mismatch)")));
-            }
-            let p = dir.join("blobs").join(&id[..2]);
-            std::fs::create_dir_all(&p)?;
-            std::fs::write(p.join(id), &data)?;
-            rep.blobs += 1;
-            rep.bytes += data.len() as i64;
         }
         let manifest = json!({"format": 1, "product": "cambium", "created_at": now(), "schema_version": version,
             "source": if pg { "postgres" } else { "sqlite" }, "tables": tables, "blobs": {"count": rep.blobs, "bytes": rep.bytes}});
@@ -151,8 +169,7 @@ impl Engine {
             return Err(Error::Bad("target database is not empty; restore only into a fresh database".into()));
         }
         for (t, _, _) in TABLES {
-            let data = std::fs::read(dir.join(format!("{t}.jsonl")))?;
-            if m["tables"][t]["sha256"].as_str() != Some(hash_bytes(&data).as_str()) {
+            if m["tables"][t]["sha256"].as_str() != Some(hash_file(&dir.join(format!("{t}.jsonl")))?.as_str()) {
                 return Err(Error::Bad(format!("{t}.jsonl checksum mismatch")));
             }
         }

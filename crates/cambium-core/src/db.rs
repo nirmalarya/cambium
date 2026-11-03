@@ -82,6 +82,9 @@ pub trait Conn {
     fn one(&mut self, sql: &str, p: &[Val]) -> Result<Option<Row>> {
         Ok(self.query(sql, p)?.into_iter().next())
     }
+    /// Run a query and hand each row to `f` as it arrives, without collecting the
+    /// result (backups of large tables). Returns the number of rows.
+    fn each(&mut self, sql: &str, p: &[Val], f: &mut dyn FnMut(Row) -> Result<()>) -> Result<u64>;
     fn is_pg(&self) -> bool;
     /// Several statements, no parameters (migrations).
     fn batch(&mut self, sql: &str) -> Result<()>;
@@ -98,21 +101,32 @@ fn sq_params(p: &[Val]) -> Vec<rusqlite::types::Value> {
         .collect()
 }
 fn sq_query(c: &rusqlite::Connection, sql: &str, p: &[Val]) -> Result<Vec<Row>> {
+    let mut out = vec![];
+    sq_each(c, sql, p, &mut |r| {
+        out.push(r);
+        Ok(())
+    })?;
+    Ok(out)
+}
+fn sq_each(c: &rusqlite::Connection, sql: &str, p: &[Val], f: &mut dyn FnMut(Row) -> Result<()>) -> Result<u64> {
     let mut st = c.prepare_cached(sql)?;
     let n = st.column_count();
     let mut rows = st.query(rusqlite::params_from_iter(sq_params(p)))?;
-    let mut out = vec![];
+    let mut count = 0;
     while let Some(r) = rows.next()? {
-        out.push(Row((0..n)
-            .map(|i| match r.get_ref(i).unwrap() {
+        let mut vals = Vec::with_capacity(n);
+        for i in 0..n {
+            vals.push(match r.get_ref(i)? {
                 rusqlite::types::ValueRef::Null => Val::Null,
                 rusqlite::types::ValueRef::Integer(x) => Val::Int(x),
                 rusqlite::types::ValueRef::Real(x) => Val::Int(x as i64),
                 rusqlite::types::ValueRef::Text(t) | rusqlite::types::ValueRef::Blob(t) => Val::Text(String::from_utf8_lossy(t).into()),
-            })
-            .collect()));
+            });
+        }
+        f(Row(vals))?;
+        count += 1;
     }
-    Ok(out)
+    Ok(count)
 }
 impl Conn for rusqlite::Connection {
     fn exec(&mut self, sql: &str, p: &[Val]) -> Result<u64> {
@@ -120,6 +134,9 @@ impl Conn for rusqlite::Connection {
     }
     fn query(&mut self, sql: &str, p: &[Val]) -> Result<Vec<Row>> {
         sq_query(self, sql, p)
+    }
+    fn each(&mut self, sql: &str, p: &[Val], f: &mut dyn FnMut(Row) -> Result<()>) -> Result<u64> {
+        sq_each(self, sql, p, f)
     }
     fn is_pg(&self) -> bool {
         false
@@ -134,6 +151,9 @@ impl Conn for rusqlite::Transaction<'_> {
     }
     fn query(&mut self, sql: &str, p: &[Val]) -> Result<Vec<Row>> {
         sq_query(self, sql, p)
+    }
+    fn each(&mut self, sql: &str, p: &[Val], f: &mut dyn FnMut(Row) -> Result<()>) -> Result<u64> {
+        sq_each(self, sql, p, f)
     }
     fn is_pg(&self) -> bool {
         false
@@ -179,25 +199,35 @@ impl postgres::types::ToSql for Val {
     }
     postgres::types::to_sql_checked!();
 }
-fn pg_rows(rows: Vec<postgres::Row>) -> Vec<Row> {
+fn pg_row(r: &postgres::Row) -> Row {
     use postgres::types::Type;
-    rows.into_iter()
-        .map(|r| {
-            Row(r
-                .columns()
-                .iter()
-                .enumerate()
-                .map(|(i, c)| match *c.type_() {
-                    // try_get: a column type we do not model (e.g. void) becomes NULL instead of panicking
-                    Type::INT2 => r.try_get::<_, Option<i16>>(i).ok().flatten().map_or(Val::Null, |x| Val::Int(x as i64)),
-                    Type::INT4 => r.try_get::<_, Option<i32>>(i).ok().flatten().map_or(Val::Null, |x| Val::Int(x as i64)),
-                    Type::INT8 => r.try_get::<_, Option<i64>>(i).ok().flatten().map_or(Val::Null, Val::Int),
-                    Type::BOOL => r.try_get::<_, Option<bool>>(i).ok().flatten().map_or(Val::Null, |x| Val::Int(x as i64)),
-                    _ => r.try_get::<_, Option<String>>(i).ok().flatten().map_or(Val::Null, Val::Text),
-                })
-                .collect())
+    Row(r
+        .columns()
+        .iter()
+        .enumerate()
+        .map(|(i, c)| match *c.type_() {
+            // try_get: a column type we do not model (e.g. void) becomes NULL instead of panicking
+            Type::INT2 => r.try_get::<_, Option<i16>>(i).ok().flatten().map_or(Val::Null, |x| Val::Int(x as i64)),
+            Type::INT4 => r.try_get::<_, Option<i32>>(i).ok().flatten().map_or(Val::Null, |x| Val::Int(x as i64)),
+            Type::INT8 => r.try_get::<_, Option<i64>>(i).ok().flatten().map_or(Val::Null, Val::Int),
+            Type::BOOL => r.try_get::<_, Option<bool>>(i).ok().flatten().map_or(Val::Null, |x| Val::Int(x as i64)),
+            _ => r.try_get::<_, Option<String>>(i).ok().flatten().map_or(Val::Null, Val::Text),
         })
-        .collect()
+        .collect())
+}
+fn pg_rows(rows: Vec<postgres::Row>) -> Vec<Row> {
+    rows.iter().map(pg_row).collect()
+}
+/// Stream rows from Postgres one at a time (the portal is read in batches, not all at once).
+fn pg_each(it: postgres::RowIter<'_>, f: &mut dyn FnMut(Row) -> Result<()>) -> Result<u64> {
+    use postgres::fallible_iterator::FallibleIterator;
+    let mut it = it;
+    let mut count = 0;
+    while let Some(r) = it.next()? {
+        f(pg_row(&r))?;
+        count += 1;
+    }
+    Ok(count)
 }
 fn refs(p: &[Val]) -> Vec<&(dyn postgres::types::ToSql + Sync)> {
     p.iter().map(|v| v as _).collect()
@@ -208,6 +238,9 @@ impl Conn for postgres::Client {
     }
     fn query(&mut self, sql: &str, p: &[Val]) -> Result<Vec<Row>> {
         Ok(pg_rows(postgres::Client::query(self, to_pg(sql).as_str(), &refs(p))?))
+    }
+    fn each(&mut self, sql: &str, p: &[Val], f: &mut dyn FnMut(Row) -> Result<()>) -> Result<u64> {
+        pg_each(self.query_raw(to_pg(sql).as_str(), refs(p))?, f)
     }
     fn is_pg(&self) -> bool {
         true
@@ -222,6 +255,9 @@ impl Conn for postgres::Transaction<'_> {
     }
     fn query(&mut self, sql: &str, p: &[Val]) -> Result<Vec<Row>> {
         Ok(pg_rows(postgres::Transaction::query(self, to_pg(sql).as_str(), &refs(p))?))
+    }
+    fn each(&mut self, sql: &str, p: &[Val], f: &mut dyn FnMut(Row) -> Result<()>) -> Result<u64> {
+        pg_each(self.query_raw(to_pg(sql).as_str(), refs(p))?, f)
     }
     fn is_pg(&self) -> bool {
         true

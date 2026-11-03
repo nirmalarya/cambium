@@ -29,7 +29,7 @@
 - Content dedup: a user who can read identical bytes elsewhere can fetch them by hash (reveals nothing new).
 - Shared machine cache: members of the cache group can list cached hashes.
 - No at-rest encryption in cmbd itself; rely on the volume / object store encryption.
-- Not yet pen-tested; threat model review by an independent security review is required before GA.
+- Not yet pen-tested by people; a manual penetration test is required before GA (the 2026-11-02 review was automated).
 
 ## Independent review, 2026-11-02
 An adversarial review of the web UI, API, cache tiers, webhooks, git import/export and
@@ -46,5 +46,13 @@ client found one high and four medium issues, all fixed with regression tests
 Lower findings also fixed: log path oracle, reviews visible only to people who can read
 every changed path, login CSRF (cross-site sign-in refused), unreferenced blobs readable
 only by their uploader, webhook lease vs. delivery time and per-hook delivery threads,
-optional `CAMBIUM_REPO_CREATORS`. Known, minor: a git commit message containing the byte
-0x1E makes `cmbd import-git` stop with an error (no data corruption).
+optional `CAMBIUM_REPO_CREATORS`. A git commit message containing the byte 0x1E
+used to stop `cmbd import-git`; commits are now read as raw objects (fixed 2026-11-03).
+
+## Fuzzing
+`fuzz/` holds libFuzzer targets for the parsers that read outside input: the `Range`
+header, paths, the three-way merge, the review classifier, OWNERS files and git commit
+objects (`cambium-core/src/fuzzcheck.rs` states the property each one must keep). CI runs
+each for a minute; the same properties run on seeded random input in every `cargo test`.
+Fuzzing found a server panic in the merge (a lone `\r`, and inconsistent ops from the diff
+library) and empty names in OWNERS files; both are fixed with regression tests.

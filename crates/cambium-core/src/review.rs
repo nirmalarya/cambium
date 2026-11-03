@@ -318,11 +318,17 @@ pub fn parse_owners(text: &str) -> Owners {
         if l.is_empty() {
             continue;
         }
-        for tok in l.split([',', ' ', '\t']).filter(|t| !t.is_empty()) {
+        for tok in l.split(|c: char| c == ',' || c.is_whitespace()).filter(|t| !t.is_empty()) {
+            // `user:` / `group:` / `@` with nothing after them name nobody
             if let Some(g) = tok.strip_prefix("group:") {
-                o.groups.push(g.into());
+                if !g.is_empty() {
+                    o.groups.push(g.into());
+                }
             } else {
-                o.users.push(tok.strip_prefix("user:").unwrap_or(tok).trim_start_matches('@').into());
+                let u = tok.strip_prefix("user:").unwrap_or(tok).trim_start_matches('@');
+                if !u.is_empty() {
+                    o.users.push(u.into());
+                }
             }
         }
     }

@@ -57,12 +57,35 @@ jobs:
         run: |
           echo "simulation seed: ${{ github.run_id }}"
           CAMBIUM_SIM_SEED=${{ github.run_id }} CAMBIUM_SIM_STEPS=1500 cargo test --locked -p cambium-core --test sim simulation_from_env -- --nocapture
+      - name: fuzz properties on random input (new seed each run; replay with CAMBIUM_FUZZ_SEED)
+        run: |
+          echo "fuzz seed: ${{ github.run_id }}"
+          CAMBIUM_FUZZ_SEED=${{ github.run_id }} CAMBIUM_FUZZ_ITERS=50000 cargo test --release --locked -p cambium-core --test fuzz_smoke
       - name: build
         run: cargo build --workspace --locked && cargo build --workspace --locked --release
       - name: end-to-end
         run: bash tests/e2e.sh
       - name: production checks
         run: bash tests/prod.sh
+  fuzz:
+    # coverage-guided fuzzing of the parsers that read outside input (fuzz/), one
+    # minute per target; a crash fails the job and its input is kept as an artifact
+    runs-on: ubuntu-24.04
+    env:
+      FUZZ_TOOLCHAIN: nightly-2026-10-28
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: rustup toolchain install $FUZZ_TOOLCHAIN --profile minimal && cargo +$FUZZ_TOOLCHAIN install cargo-fuzz --version 0.12.0 --locked
+      - name: fuzz each target for 60 s
+        run: |
+          cd fuzz
+          for t in range path merge semantic owners git_commit; do
+            echo "== $t"
+            cargo +$FUZZ_TOOLCHAIN fuzz run $t -- -max_total_time=60 -rss_limit_mb=2048 || exit 1
+          done
+      - if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with: { name: fuzz-artifacts, path: fuzz/artifacts }
   audit:
     runs-on: ubuntu-24.04
     steps:

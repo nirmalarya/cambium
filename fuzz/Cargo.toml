@@ -1,0 +1,66 @@
+# Coverage-guided fuzzing (libFuzzer) of the parsers that read outside input.
+# Needs nightly Rust and cargo-fuzz:  cargo +nightly fuzz run merge
+# The properties live in cambium-core/src/fuzzcheck.rs; tests/fuzz_smoke.rs runs
+# the same checks on stable with seeded random input.
+[package]
+name = "cambium-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+license = "MIT"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+cambium-core = { path = "../crates/cambium-core" }
+
+# not part of the main workspace (it needs nightly)
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "range"
+path = "fuzz_targets/range.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "path"
+path = "fuzz_targets/path.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "merge"
+path = "fuzz_targets/merge.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "semantic"
+path = "fuzz_targets/semantic.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "owners"
+path = "fuzz_targets/owners.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "git_commit"
+path = "fuzz_targets/git_commit.rs"
+test = false
+doc = false
+bench = false

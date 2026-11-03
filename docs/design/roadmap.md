@@ -26,12 +26,16 @@ How Cambium is built, design point by design point, and the order the work was d
 | Review: semantic approval rules, e.g. comment-only edits separated from logic | N approvals + path owners | Reviews point at a changeset, not a branch; add rules by change kind |
 | No global merge queue; post-merge and pre-deploy testing | No queue | Keep; landing is lock-free rebase + CAS with retry |
 | Git ingestion / migration | One-shot import | Import `main` and release branches; incremental re-import |
-| Hermetic simulations, fuzzing, rate limiting | Property tests, rate limiting | Add a deterministic simulation harness and fuzz targets |
+| Hermetic simulations, fuzzing, rate limiting | Property tests, rate limiting | Done: deterministic simulation harness (`tests/sim.rs`) and fuzz targets (`fuzz/`, same properties on stable in `tests/fuzz_smoke.rs`) |
 | No offline support | Removed the outbox | Done |
 
 ## Order of work
 1. ✅ **Ref model** (done): only `main` and `release/*`. Changesets are created without refs, then land on `main` (server rebase + CAS). Reviews point at changesets.
-2. ✅ **Trees and fetch protocol** (done; `cmb mount` still uses the flat listing): content-hashed directory trees, a recursive fetch from the root tree, and the client and mount moved onto it.
+2. ✅ **Trees and fetch protocol** (done; `cmb mount` moved onto trees in step 5): content-hashed directory trees, a recursive fetch from the root tree, and the client and mount moved onto it.
 3. ✅ **Derived-data framework** (done: `Derive` trait, eager/deferred, versioned, iterative, `cmbd derive` backfill; skip lists live; blame still on its own cache): move manifests, blame and path history onto it; add skip lists.
 4. ✅ **Cache tiers** (done: `cmbd daemon` → `cmbd edge` → `cmbd`, blobs and complete trees cached, short-lived positive authz memo): per-node daemon and regional edge with strict tiering.
 5. **Review rules** ✅ (docs/comment-only classification, `cmb protect --trivial`), **bisect/revert APIs** ✅; incremental git ingestion ✅, `cmb mount` on trees ✅, deterministic simulation harness ✅ (`tests/sim.rs`; CI soaks a new seed every run).
+6. ✅ **Hardening** (done): fuzz targets for the parsers that read outside input (Range header,
+   paths, three-way merge, review classifier, OWNERS files, git commit objects), run for a
+   minute each in CI; `cmb sync` writes conflict markers; the CLI reports bad replies and disk
+   errors instead of panicking; backups stream; git import reads raw commit objects.

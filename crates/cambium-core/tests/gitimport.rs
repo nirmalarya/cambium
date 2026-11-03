@@ -263,3 +263,28 @@ fn export_to_git_is_faithful_and_incremental() {
     assert!(e.export_git("r", &d.path().join("other.git"), true).is_ok());
     let _ = c2;
 }
+
+#[test]
+fn messages_with_any_bytes_import_intact() {
+    // a commit message may contain the record separator the old log parser used
+    // (0x1E), other control bytes and non-UTF-8-looking text
+    let d = tempfile::tempdir().unwrap();
+    let r = d.path().join("src");
+    std::fs::create_dir(&r).unwrap();
+    g(&r, &["init", "-q"], 0);
+    w(&r, "a.txt", "1\n");
+    g(&r, &["add", "-A"], 0);
+    g(&r, &["commit", "-qm", "before \u{1e} after\n\nbody \u{1f} line\u{1e}"], 1_600_000_000);
+    w(&r, "a.txt", "2\n");
+    g(&r, &["add", "-A"], 0);
+    g(&r, &["commit", "-qm", "second"], 1_600_000_100);
+    let e = Engine::open(d.path().join("t.db").to_str().unwrap(), Arc::new(MemBlobStore::default())).unwrap();
+    let rep = e.import_git(&r, "imp", "alice").unwrap();
+    assert_eq!(rep.commits, 2);
+    let head = e.get_ref("imp", "main").unwrap().unwrap();
+    let log = e.log("imp", &head, None, 10).unwrap();
+    assert_eq!(log.len(), 3, "two commits on the repository's root changeset");
+    assert_eq!(log[0].message, "second");
+    assert_eq!(log[1].message, "before \u{1e} after\n\nbody \u{1f} line\u{1e}");
+    assert_eq!(log[1].author, "Ada Example <ada@example.invalid>");
+}

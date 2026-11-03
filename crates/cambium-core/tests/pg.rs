@@ -146,3 +146,37 @@ fn pg_tokens_sessions_and_migrations() {
     let v = a.db.query("SELECT max(version) FROM schema_migrations", vec![]).unwrap();
     assert_eq!(v[0].i(0), cambium_core::migrate::latest());
 }
+
+#[test]
+#[ignore = "needs Postgres: run tests/multinode.sh"]
+fn pg_backup_streams_and_restores_into_sqlite() {
+    // a database of its own: a backup copies everything, and other tests' blobs are gone
+    let Ok(url) = std::env::var("CAMBIUM_TEST_PG") else { return };
+    std::env::set_var("CAMBIUM_PG_POOL", "2");
+    let name = format!("bk{}", rand_suffix());
+    use cambium_core::db::Conn;
+    cambium_core::db::pg_connect(&url).unwrap().batch(&format!("CREATE DATABASE {name}")).unwrap();
+    let url = format!("{}/{name}", url.rsplit_once('/').unwrap().0);
+    let d = tempfile::tempdir().unwrap();
+    let a = Engine::open_pg(&url, Arc::new(FsBlobStore::new(d.path().join("b")).unwrap())).unwrap();
+    let repo = "r".to_string();
+    let root = a.create_repo(&repo, "alice").unwrap();
+    // the same content under two paths: copied once
+    let x = a.blobs.put(b"same\n").unwrap();
+    let mut files: Vec<FileChange> =
+        (0..300).map(|i| fc(&format!("many/f{i}.txt"), &a.blobs.put(format!("{i}\n").as_bytes()).unwrap())).collect();
+    files.push(fc("one.txt", &x));
+    files.push(fc("two.txt", &x));
+    let c = a.commit(&repo, "main", &root, "alice", "files", files).unwrap();
+    let rep = a.backup(&d.path().join("bk")).unwrap();
+    assert!(rep.rows > 300 && rep.blobs >= 301);
+    let ids: Vec<_> =
+        std::fs::read_dir(d.path().join("bk/blobs")).unwrap().flat_map(|s| std::fs::read_dir(s.unwrap().path()).unwrap()).collect();
+    assert_eq!(ids.len() as i64, rep.blobs, "every blob copied exactly once");
+    let b2: Arc<dyn BlobStore> = Arc::new(FsBlobStore::new(d.path().join("restored")).unwrap());
+    let f = Engine::open(d.path().join("r.db").to_str().unwrap(), b2).unwrap();
+    let r2 = f.restore(&d.path().join("bk")).unwrap();
+    assert_eq!((r2.rows, r2.blobs), (rep.rows, rep.blobs));
+    assert_eq!(f.get_ref(&repo, "main").unwrap(), Some(c.id.clone()));
+    assert_eq!(f.manifest(&repo, &c.id).unwrap(), a.manifest(&repo, &c.id).unwrap());
+}

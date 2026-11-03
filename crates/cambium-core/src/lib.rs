@@ -8,6 +8,8 @@ pub mod blob;
 pub mod db;
 pub mod derived;
 pub mod engine;
+#[doc(hidden)]
+pub mod fuzzcheck;
 pub mod gitexport;
 pub mod gitimport;
 pub mod limits;
