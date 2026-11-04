@@ -82,12 +82,66 @@ cmbd ──(outbound, internal only)──▶ identity provider JWKS endpoint (s
 - **Git migration:** `cmbd import-git <git-dir> <repo> [owner]` imports every commit on branches and tags. In the container the mounted repo is owned by another uid, so pass `-e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0=<path>` (see tests/docker-smoke.sh).
 
 ## Kubernetes (preferred for production)
-- Chart: `deploy/helm/cambium`. Values use placeholders (`*.example.internal`) and `existingSecret`; real values live in an environment-specific values file outside this repo.
-- Migrations run in a `pre-upgrade` Job; pods set `CAMBIUM_AUTO_MIGRATE=0`.
-- Pod: non-root 65532, read-only rootfs, drop ALL, seccomp RuntimeDefault, no service-account token, probes, resources, topology spread, PDB, NetworkPolicy, optional Ingress (TLS required) and ServiceMonitor.
-- `import-git` uses the `tools` image target (has git) as a one-off Job; the runtime image is distroless.
-- Verified only by `helm lint --strict` and kubeconform (1.28–1.31); not installed on a real cluster.
-- Ops procedures: runbook.md. Security: security-model.md. SLOs: slos.md. Go-live: rollout-checklist.md.
+Chart: `deploy/helm/cambium`. It runs cmbd (2+ replicas) and, optionally, the cache tiers.
+Postgres and the object store are yours to provide (a managed Postgres and an
+S3-compatible store such as RustFS, MinIO or a cloud bucket); the chart does not run them.
+
+**Install**
+1. Push the image to a registry the cluster can pull from (`docker build --target runtime .`),
+   and pin it by digest (`image.digest`).
+2. Create the Secret the chart reads (name: `existingSecret`, default `cambium-secrets`):
+   ```sh
+   kubectl -n cambium create secret generic cambium-secrets \
+     --from-literal=CAMBIUM_DB='postgres://cambium:…@db.internal:5432/cambium?sslmode=require' \
+     --from-literal=CAMBIUM_S3_ACCESS_KEY=… --from-literal=CAMBIUM_S3_SECRET_KEY=…
+   ```
+   (or let your secrets operator create it). Nothing secret goes in values.
+3. Write your values file outside this repo: image, `config.CAMBIUM_S3_ENDPOINT`, OIDC
+   settings, `networkPolicy.ingressFrom` (your ingress controller's and CI's namespaces),
+   `networkPolicy.egressTo`/`egressPorts` (where Postgres and the object store are), and an
+   Ingress with TLS if people reach it through one.
+4. `helm upgrade --install cambium deploy/helm/cambium -n cambium -f my-values.yaml --wait`
+5. Create a first admin token: `kubectl -n cambium run tok --rm -i --restart=Never
+   --image=<image> --env=CAMBIUM_DB=… -- token alice` (or sign in with SSO).
+
+**What the chart does**
+- Migrations run in a `pre-install,pre-upgrade` Job before pods roll; pods set
+  `CAMBIUM_AUTO_MIGRATE=0`. The Job uses only the Secret, so it works on first install.
+- Pods: non-root 65532, read-only root filesystem, all capabilities dropped, seccomp
+  RuntimeDefault, no service-account token, startup/liveness/readiness probes, resources,
+  topology spread, a PodDisruptionBudget, `maxUnavailable: 0` rollouts. On SIGTERM a pod fails
+  `/readyz`, waits for the Service to notice, then finishes in-flight requests.
+- NetworkPolicy: only the namespaces you list may reach cmbd; it may reach only DNS and the
+  addresses/ports you list.
+- Optional: Ingress (TLS required), ServiceMonitor, pod TLS.
+- `import-git` uses the `tools` image target (has git) as a one-off Job; the runtime image is
+  distroless.
+
+**Cache tiers** (`edge.enabled`, `daemon.enabled`, both off by default)
+- `edge`: a Deployment + Service in front of cmbd (regional cache).
+- `daemon`: a DaemonSet with a node-local Service (`internalTrafficPolicy: Local`); CI and agent
+  pods set `CAMBIUM_SERVER=http://cambium-daemon.<ns>.svc:7880` and always reach the daemon
+  on their own node. It goes through the edge when there is one.
+- Caches are capped (`edge.cacheMB`, `daemon.cacheMB`; oldest objects are removed first) and
+  live on `emptyDir`: anything missing is fetched again. Permissions stay with cmbd.
+- Each tier has its own NetworkPolicy: only the edge may reach cmbd, only daemons (and the
+  namespaces in `edge.ingressFrom`) may reach the edge, only `daemon.ingressFrom` may use a daemon.
+
+**Tested**
+- `tests/k8s-check.sh` (CI): `helm lint --strict`, kubeconform for Kubernetes 1.28–1.31 and
+  policy assertions on the rendered objects, with and without the tiers.
+- `tests/k8s-install.sh` (CI, and locally with kind): installs the chart on a throwaway kind
+  cluster with its own kubeconfig (other clusters are not touched), with in-cluster test
+  Postgres and RustFS, then checks: migrations and readiness; commit and checkout from inside
+  the cluster; the NetworkPolicy (reachable from the allowed namespace, blocked from others,
+  with a positive control); checkout through daemon -> edge -> cmbd and a daemon cache hit;
+  every commit landing while a pod is deleted and while `helm upgrade` rolls (≈300 commits
+  each, none lost); history intact after restarting every pod. Last run: Kubernetes 1.37 (kind
+  v0.33), 12/12.
+- Not yet tested: a real multi-node cluster, managed Postgres/object storage, an ingress
+  controller in front, and load at scale.
+
+Ops procedures: runbook.md. Security: security-model.md. SLOs: slos.md. Go-live: rollout-checklist.md.
 
 ## Run
 ```sh

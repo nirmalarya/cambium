@@ -9,6 +9,8 @@ Found and fixed during build/test:
 | B5 | S3 | `cmbd import-git` of a commit whose message contains byte 0x1E | imported intact | import stopped with "unexpected git log output" | commits are read as raw objects (`git cat-file`), not parsed from `git log` output; test `messages_with_any_bytes_import_intact` |
 | B6 | S3 | `cmb` given an unexpected server reply (proxy page, wrong server) or a disk error | readable error | Rust panic from `unwrap()` | every reply field and file operation reports a `cmb:` error instead |
 | B7 | S3 | `cmbd backup` of a large database | constant memory | each table loaded fully into memory | rows streamed to disk (`Conn::each`); blob ids de-duplicated on disk, not in memory |
+| B8 | S3 | both sides make the same edit, but the diff splits it into different hunks | merged cleanly | landing reported a conflict | `merge3` and `merge3_marked` share one implementation that compares what each side made of the overlapping lines (`text.rs`); found by cargo fuzz |
+| B9 | S3 | `cmbd edge` / `cmbd daemon` in Kubernetes | bounded disk, own health, clean stop | cache grew without limit (pod evicted at its volume limit); health checks went upstream; SIGTERM dropped requests in flight | `CAMBIUM_EDGE_CACHE_MB` (oldest removed first), local `/healthz` and upstream-checking `/readyz`, drain on SIGTERM; unit tests in `edge.rs`, kind test K27/K28 |
 
 Open: none. Known gaps: none tracked here; see the README's Known issues for what production
 use still needs.

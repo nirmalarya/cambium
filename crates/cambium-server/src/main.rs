@@ -953,7 +953,7 @@ async fn serve(ctx: Arc<Ctx>, data: String) {
     }
     cambium_core::log::info("cmbd stopped cleanly", json!({}));
 }
-async fn shutdown_signal() {
+pub(crate) async fn shutdown_signal() {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
     };

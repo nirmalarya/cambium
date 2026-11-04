@@ -87,6 +87,10 @@ fn known_tricky_inputs() {
         ("path", b"a//b"),
         ("merge", b"a\nb\n\xffa\nB\n\xffa\nC"),
         ("merge", b"\xffx\n\xffy"),
+        // cargo fuzz (CI): the file content itself contains a marker line
+        ("merge", b"\n\xff\n>>>>>>> theirs"),
+        // cargo fuzz: the same edit on both sides, split into different hunks
+        ("merge", b";1\n\n\n\xdc\n\xdc\n\np\n\x03\n\n\xdc\n\n\xff\n\n\n\xff\n\n\xff\n\n"),
         ("git_commit", b"tree 1\nparent 2\nauthor A <a@b> 1 +0000\n\nmsg \x1e with separator"),
         ("git_commit", b"author \n\n"),
         ("owners", b"user:\ngroup: # x\n@"),

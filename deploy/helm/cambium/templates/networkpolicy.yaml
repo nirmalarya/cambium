@@ -14,6 +14,19 @@ spec:
     - from: {{- toYaml .Values.networkPolicy.ingressFrom | nindent 8 }}
       ports:
         - { protocol: TCP, port: 7878 }
+    {{- if or .Values.edge.enabled .Values.daemon.enabled }}
+    # the cache tiers in front of cmbd (the daemon only when there is no edge)
+    - from:
+        {{- if .Values.edge.enabled }}
+        - podSelector:
+            matchLabels: { app.kubernetes.io/name: cambium-edge, app.kubernetes.io/instance: {{ .Release.Name }} }
+        {{- else }}
+        - podSelector:
+            matchLabels: { app.kubernetes.io/name: cambium-daemon, app.kubernetes.io/instance: {{ .Release.Name }} }
+        {{- end }}
+      ports:
+        - { protocol: TCP, port: 7878 }
+    {{- end }}
   egress:
     - to:
         - namespaceSelector: {}

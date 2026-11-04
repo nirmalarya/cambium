@@ -102,6 +102,32 @@ serviceMonitor:
   # used when podTLS is enabled (scheme becomes https)
   tlsConfig: { insecureSkipVerify: false }
 
+# Cache tiers (optional; docs/guide/admin.md). Same image, same API:
+#   clients -> daemon (one per node) -> edge (regional) -> cmbd.
+# Immutable objects (blobs, trees) are cached; permissions stay with cmbd.
+edge:
+  enabled: false
+  replicaCount: 2
+  cacheMB: 20000            # oldest cached objects are removed above this (CAMBIUM_EDGE_CACHE_MB)
+  authzTTL: 60              # seconds a positive permission answer is reused (0 = ask every time)
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits: { cpu: "1", memory: 512Mi }
+  # who may reach the edge; empty = the same as networkPolicy.ingressFrom
+  ingressFrom: []
+daemon:
+  enabled: false
+  cacheMB: 5000
+  # clients reach it at http://<release>-cambium-daemon.<ns>.svc:7880 and always get
+  # the daemon on their own node (internalTrafficPolicy: Local)
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { cpu: 500m, memory: 256Mi }
+  # namespaces whose pods (CI, agents) may use the daemon
+  ingressFrom: []
+  tolerations: []
+  nodeSelector: {}
+
 migrationJob:
   enabled: true
   backoffLimit: 1

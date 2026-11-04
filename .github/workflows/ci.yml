@@ -116,6 +116,22 @@ jobs:
           sudo tar -xzf /tmp/kc.tgz -C /usr/local/bin kubeconform
       - name: lint, render, kubeconform, policy checks
         run: bash tests/k8s-check.sh
+  k8s-install:
+    # the Helm chart installed for real on a throwaway kind cluster (tests/k8s-install.sh):
+    # migrations, cache tiers, NetworkPolicy, a pod lost and a rolling upgrade under traffic
+    needs: [helm]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
+        with: { version: v3.17.3 }
+      - name: install kind v0.33.0 (checksum verified)
+        run: |
+          curl -sSLo /tmp/kind https://github.com/kubernetes-sigs/kind/releases/download/v0.33.0/kind-linux-amd64
+          echo "aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d  /tmp/kind" | sha256sum -c -
+          sudo install -m 0755 /tmp/kind /usr/local/bin/kind
+      - name: install on kind and exercise
+        run: bash tests/k8s-install.sh
   image:
     needs: [lint, test, audit, sbom, helm]
     runs-on: ubuntu-24.04

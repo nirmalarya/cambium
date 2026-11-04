@@ -8,8 +8,9 @@ ok(){ if eval "$2" >/dev/null 2>&1; then pass=$((pass+1)); echo "PASS $1"; else 
 ok "K01 helm lint --strict (default + all options)" 'helm lint --strict $C && helm lint --strict $C --set ingress.enabled=true,ingress.tlsSecretName=t,podTLS.enabled=true,podTLS.secretName=p,serviceMonitor.enabled=true'
 helm template cambium $C -n cambium > $T/d.yaml
 helm template cambium $C -n cambium --set ingress.enabled=true,ingress.tlsSecretName=t,podTLS.enabled=true,podTLS.secretName=p > $T/f.yaml
+helm template cambium $C -n cambium --set edge.enabled=true,daemon.enabled=true > $T/t.yaml
 for v in 1.28.0 1.29.0 1.30.0 1.31.0; do
-  ok "K02 kubeconform -strict k8s $v" 'kubeconform -strict -summary -kubernetes-version '$v' $T/d.yaml $T/f.yaml | grep -q "Invalid: 0, Errors: 0"'
+  ok "K02 kubeconform -strict k8s $v" 'kubeconform -strict -summary -kubernetes-version '$v' $T/d.yaml $T/f.yaml $T/t.yaml | grep -q "Invalid: 0, Errors: 0"'
 done
 py(){ python3 - "$T/d.yaml" <<PY
 import sys, yaml
@@ -35,4 +36,28 @@ ok "K12 secrets only via existing Secret ref (none in ConfigMap or chart)" 'py "
 ok "K13 Service is ClusterIP (not exposed outside the cluster)" 'py "assert k[\"Service\"][\"spec\"][\"type\"]==\"ClusterIP\""'
 ok "K14 ingress (when enabled) requires TLS" '! helm template cambium $C --set ingress.enabled=true && grep -q "tls:" $T/f.yaml'
 ok "K15 migration Job works before chart objects exist and is not a Service endpoint" 'py "jt=k[\"Job\"][\"spec\"][\"template\"]; sel=k[\"Service\"][\"spec\"][\"selector\"]; lab=jt[\"metadata\"][\"labels\"]; assert not all(lab.get(a)==b for a,b in sel.items()); assert \"serviceAccountName\" not in jt[\"spec\"]; assert not any(\"configMapRef\" in e for e in jt[\"spec\"][\"containers\"][0].get(\"envFrom\",[]))"'
+# cache tiers (edge Deployment + daemon DaemonSet)
+pyt(){ python3 - "$T/t.yaml" <<PY
+import sys, yaml
+docs=[d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+by=lambda kind, comp: next(d for d in docs if d["kind"]==kind and d["metadata"]["labels"].get("app.kubernetes.io/component")==comp)
+pods={"edge": by("Deployment","edge")["spec"]["template"], "daemon": by("DaemonSet","daemon")["spec"]["template"]}
+svc=next(d for d in docs if d["kind"]=="Service" and "component" not in str(d["metadata"]["labels"]))
+$1
+PY
+}
+ok "K16 tier pods are hardened like cmbd (non-root, read-only, no caps, probes)" 'pyt "
+for p in pods.values():
+  s=p[\"spec\"]; c=s[\"containers\"][0]; cs=c[\"securityContext\"]
+  assert s[\"securityContext\"][\"runAsNonRoot\"] and cs[\"readOnlyRootFilesystem\"] and cs[\"capabilities\"][\"drop\"]==[\"ALL\"] and not s[\"automountServiceAccountToken\"]
+  assert c[\"livenessProbe\"][\"httpGet\"][\"path\"]==\"/healthz\" and c[\"readinessProbe\"][\"httpGet\"][\"path\"]==\"/readyz\""'
+ok "K17 the cmbd Service never selects tier pods" 'pyt "
+sel=svc[\"spec\"][\"selector\"]
+for p in pods.values(): assert not all(p[\"metadata\"][\"labels\"].get(a)==b for a,b in sel.items())"'
+ok "K18 daemon Service is node-local; tiers chain daemon -> edge -> cmbd" 'pyt "
+d=next(x for x in docs if x[\"kind\"]==\"Service\" and x[\"metadata\"][\"labels\"].get(\"app.kubernetes.io/component\")==\"daemon\")
+assert d[\"spec\"][\"internalTrafficPolicy\"]==\"Local\"
+env=lambda p: {e[\"name\"]:e.get(\"value\") for e in p[\"spec\"][\"containers\"][0][\"env\"]}
+assert env(pods[\"daemon\"])[\"CAMBIUM_UPSTREAM\"].endswith(\"-edge:7879\") and env(pods[\"edge\"])[\"CAMBIUM_UPSTREAM\"].endswith(\":7878\")"'
+ok "K19 tiers refuse to render with podTLS (they speak plain HTTP in-cluster)" '! helm template cambium $C --set edge.enabled=true,podTLS.enabled=true,podTLS.secretName=p'
 echo "k8s: $pass passed, $fail failed"; rm -rf $T; [ $fail = 0 ]

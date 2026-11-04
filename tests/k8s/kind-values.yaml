@@ -1,0 +1,32 @@
+# Values for the kind install test only (tests/k8s-install.sh).
+replicaCount: 2
+image:
+  repository: cambium-cmbd
+  tag: kindtest
+  pullPolicy: Never          # loaded into the nodes with `kind load`
+resources:
+  requests: { cpu: 100m, memory: 128Mi }
+  limits: { cpu: "1", memory: 512Mi }
+config:
+  CAMBIUM_S3_ENDPOINT: http://rustfs.cambium.svc:9000
+  CAMBIUM_DB_TLS: ""         # in-cluster test database, no TLS
+  CAMBIUM_PG_POOL: "4"
+  CAMBIUM_COOKIE_SECURE: "0" # no ingress/TLS in this test
+  CAMBIUM_HSTS: "0"
+  CAMBIUM_TRUST_PROXY: "0"
+networkPolicy:
+  enabled: true
+  ingressFrom:
+    - namespaceSelector:
+        matchLabels: { kubernetes.io/metadata.name: cambium-client }
+  egressTo:
+    - ipBlock: { cidr: 10.0.0.0/8 }
+  egressPorts: [5432, 9000]
+# cache tiers: client -> daemon (this node) -> edge -> cmbd
+edge:
+  enabled: true
+  replicaCount: 2
+  cacheMB: 200
+daemon:
+  enabled: true
+  cacheMB: 100

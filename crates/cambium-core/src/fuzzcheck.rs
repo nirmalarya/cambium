@@ -47,8 +47,13 @@ pub fn merge(data: &[u8]) {
         Ok(clean) => assert_eq!((m.as_str(), n), (clean.as_str(), 0)),
         Err(()) => {
             assert!(n > 0, "merge3 refused but the marked merge found no conflict");
-            assert_eq!(m.lines().filter(|l| *l == "<<<<<<< ours").count(), n);
-            assert_eq!(m.lines().filter(|l| *l == ">>>>>>> theirs").count(), n);
+            // exact marker counts only when the files do not already contain marker
+            // lines themselves (found by cargo fuzz: content may be anything)
+            let has = |x: &str| x.lines().any(|l| l.starts_with("<<<<<<<") || l.starts_with(">>>>>>>") || l == "=======");
+            if !has(b) && !has(o) && !has(t) {
+                assert_eq!(m.lines().filter(|l| *l == "<<<<<<< ours").count(), n);
+                assert_eq!(m.lines().filter(|l| *l == ">>>>>>> theirs").count(), n);
+            }
         }
     }
 }

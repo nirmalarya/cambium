@@ -1,0 +1,207 @@
+{{- /*
+Cache tiers: `cmbd edge` (a regional cache in front of cmbd) and `cmbd daemon`
+(one per node). Both are optional and off by default.
+*/ -}}
+{{- if and (or .Values.edge.enabled .Values.daemon.enabled) .Values.podTLS.enabled }}
+{{- fail "edge/daemon tiers talk plain HTTP inside the cluster: disable podTLS, or run the tiers outside this chart" }}
+{{- end }}
+{{- $full := include "cambium.fullname" . }}
+{{- if .Values.edge.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $full }}-edge
+  labels: {{- include "cambium.labels" . | nindent 4 }}
+    app.kubernetes.io/component: edge
+spec:
+  replicas: {{ .Values.edge.replicaCount }}
+  revisionHistoryLimit: 5
+  strategy: { type: RollingUpdate, rollingUpdate: { maxUnavailable: 0, maxSurge: 1 } }
+  selector:
+    matchLabels: { app.kubernetes.io/name: cambium-edge, app.kubernetes.io/instance: {{ .Release.Name }} }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: cambium-edge, app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: edge }
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext: {{- include "cambium.podSecurity" . | nindent 8 }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: { app.kubernetes.io/name: cambium-edge, app.kubernetes.io/instance: {{ .Release.Name }} }
+      containers:
+        - name: edge
+          image: {{ include "cambium.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["edge"]
+          env:
+            - { name: CAMBIUM_UPSTREAM, value: "http://{{ $full }}:{{ .Values.service.port }}" }
+            - { name: CAMBIUM_ADDR, value: "0.0.0.0:7879" }
+            - { name: CAMBIUM_DATA, value: /data }
+            - { name: CAMBIUM_EDGE_CACHE_MB, value: {{ .Values.edge.cacheMB | quote }} }
+            - { name: CAMBIUM_EDGE_AUTHZ_TTL, value: {{ .Values.edge.authzTTL | quote }} }
+            - { name: CAMBIUM_SHUTDOWN_DRAIN_S, value: "5" }
+            - { name: CAMBIUM_LOG, value: {{ .Values.config.CAMBIUM_LOG | default "info" | quote }} }
+          ports: [{ name: http, containerPort: 7879, protocol: TCP }]
+          securityContext: {{- include "cambium.containerSecurity" . | nindent 12 }}
+          resources: {{- toYaml .Values.edge.resources | nindent 12 }}
+          livenessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 10, timeoutSeconds: 3, failureThreshold: 3 }
+          readinessProbe: { httpGet: { path: /readyz, port: http }, periodSeconds: 5, timeoutSeconds: 3, failureThreshold: 2 }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+      volumes:
+        # the cache is disposable: anything missing is fetched again
+        - name: data
+          emptyDir: { sizeLimit: {{ add .Values.edge.cacheMB (div .Values.edge.cacheMB 5) 64 }}Mi }
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $full }}-edge
+  labels: {{- include "cambium.labels" . | nindent 4 }}
+    app.kubernetes.io/component: edge
+spec:
+  selector: { app.kubernetes.io/name: cambium-edge, app.kubernetes.io/instance: {{ .Release.Name }} }
+  ports: [{ name: http, port: 7879, targetPort: http, protocol: TCP }]
+{{- if gt (int .Values.edge.replicaCount) 1 }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $full }}-edge
+  labels: {{- include "cambium.labels" . | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: cambium-edge, app.kubernetes.io/instance: {{ .Release.Name }} }
+{{- end }}
+{{- if .Values.networkPolicy.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $full }}-edge
+  labels: {{- include "cambium.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: cambium-edge, app.kubernetes.io/instance: {{ .Release.Name }} }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        {{- toYaml (default .Values.networkPolicy.ingressFrom .Values.edge.ingressFrom) | nindent 8 }}
+        - podSelector:
+            matchLabels: { app.kubernetes.io/name: cambium-daemon, app.kubernetes.io/instance: {{ .Release.Name }} }
+      ports: [{ protocol: TCP, port: 7879 }]
+  egress:
+    - to: [{ namespaceSelector: {}, podSelector: { matchLabels: { k8s-app: kube-dns } } }]
+      ports: [{ protocol: UDP, port: 53 }, { protocol: TCP, port: 53 }]
+    - to:
+        - podSelector:
+            matchLabels: {{- include "cambium.selector" . | nindent 14 }}
+      ports: [{ protocol: TCP, port: 7878 }]
+{{- end }}
+{{- end }}
+{{- if .Values.daemon.enabled }}
+{{- $up := ternary (printf "http://%s-edge:7879" $full) (printf "http://%s:%v" $full .Values.service.port) .Values.edge.enabled }}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ $full }}-daemon
+  labels: {{- include "cambium.labels" . | nindent 4 }}
+    app.kubernetes.io/component: daemon
+spec:
+  revisionHistoryLimit: 5
+  updateStrategy: { type: RollingUpdate, rollingUpdate: { maxUnavailable: 1 } }
+  selector:
+    matchLabels: { app.kubernetes.io/name: cambium-daemon, app.kubernetes.io/instance: {{ .Release.Name }} }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: cambium-daemon, app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: daemon }
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext: {{- include "cambium.podSecurity" . | nindent 8 }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: daemon
+          image: {{ include "cambium.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["daemon"]
+          env:
+            - { name: CAMBIUM_UPSTREAM, value: {{ $up | quote }} }
+            - { name: CAMBIUM_ADDR, value: "0.0.0.0:7880" }
+            - { name: CAMBIUM_DATA, value: /data }
+            - { name: CAMBIUM_EDGE_CACHE_MB, value: {{ .Values.daemon.cacheMB | quote }} }
+            - { name: CAMBIUM_EDGE_AUTHZ_TTL, value: {{ .Values.edge.authzTTL | quote }} }
+            - { name: CAMBIUM_SHUTDOWN_DRAIN_S, value: "5" }
+          ports: [{ name: http, containerPort: 7880, protocol: TCP }]
+          securityContext: {{- include "cambium.containerSecurity" . | nindent 12 }}
+          resources: {{- toYaml .Values.daemon.resources | nindent 12 }}
+          livenessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 10, timeoutSeconds: 3, failureThreshold: 3 }
+          readinessProbe: { httpGet: { path: /readyz, port: http }, periodSeconds: 5, timeoutSeconds: 3, failureThreshold: 2 }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+      volumes:
+        - name: data
+          emptyDir: { sizeLimit: {{ add .Values.daemon.cacheMB (div .Values.daemon.cacheMB 5) 64 }}Mi }
+      {{- with .Values.daemon.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.daemon.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $full }}-daemon
+  labels: {{- include "cambium.labels" . | nindent 4 }}
+    app.kubernetes.io/component: daemon
+spec:
+  # a client always reaches the daemon on its own node
+  internalTrafficPolicy: Local
+  selector: { app.kubernetes.io/name: cambium-daemon, app.kubernetes.io/instance: {{ .Release.Name }} }
+  ports: [{ name: http, port: 7880, targetPort: http, protocol: TCP }]
+{{- if .Values.networkPolicy.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $full }}-daemon
+  labels: {{- include "cambium.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: cambium-daemon, app.kubernetes.io/instance: {{ .Release.Name }} }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from: {{- toYaml (default .Values.networkPolicy.ingressFrom .Values.daemon.ingressFrom) | nindent 8 }}
+      ports: [{ protocol: TCP, port: 7880 }]
+  egress:
+    - to: [{ namespaceSelector: {}, podSelector: { matchLabels: { k8s-app: kube-dns } } }]
+      ports: [{ protocol: UDP, port: 53 }, { protocol: TCP, port: 53 }]
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- if .Values.edge.enabled }}
+              { app.kubernetes.io/name: cambium-edge, app.kubernetes.io/instance: {{ .Release.Name }} }
+              {{- else }}
+              {{- include "cambium.selector" . | nindent 14 }}
+              {{- end }}
+      ports: [{ protocol: TCP, port: {{ ternary 7879 7878 .Values.edge.enabled }} }]
+{{- end }}
+{{- end }}

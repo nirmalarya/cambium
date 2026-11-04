@@ -10,6 +10,12 @@
 //! positive answer is remembered for CAMBIUM_EDGE_AUTHZ_TTL seconds (default 60,
 //! 0 = ask every time), which bounds how long a revoked grant can still be served.
 //! Denials are never remembered.
+//!
+//! The cache can be capped with CAMBIUM_EDGE_CACHE_MB (default 0 = no cap): every
+//! 30 s the oldest cached objects are removed until it is back under 90% of the cap
+//! (an object removed is simply fetched again on its next use). `/healthz` answers
+//! locally; `/readyz` checks the upstream. On SIGTERM the tier fails `/readyz` for
+//! CAMBIUM_SHUTDOWN_DRAIN_S (default 5) and then finishes in-flight requests.
 use axum::{
     body::Bytes,
     extract::Request,
@@ -32,6 +38,8 @@ struct Edge {
     authz_ttl: std::time::Duration,
     /// "daemon" or "edge", reported in x-cambium-tier
     tier: &'static str,
+    /// set on SIGTERM: /readyz fails so traffic moves elsewhere before we stop
+    draining: std::sync::atomic::AtomicBool,
 }
 impl Edge {
     fn authz_key(h: &HeaderMap, object: &str) -> Option<String> {
@@ -158,6 +166,20 @@ fn handle(e: &Edge, method: String, path_q: String, h: HeaderMap, body: Bytes) -
     r
 }
 fn handle_inner(e: &Edge, method: String, path_q: String, h: HeaderMap, body: Bytes) -> Response {
+    // the tier's own health: liveness never depends on the upstream; readiness does
+    match (method.as_str(), path_q.split('?').next().unwrap_or("")) {
+        ("GET", "/healthz") => return (StatusCode::OK, "ok").into_response(),
+        ("GET", "/readyz") => {
+            if e.draining.load(std::sync::atomic::Ordering::Relaxed) {
+                return (StatusCode::SERVICE_UNAVAILABLE, "draining").into_response();
+            }
+            return match e.agent.get(&format!("{}/healthz", e.upstream)).timeout(std::time::Duration::from_secs(2)).call() {
+                Ok(_) => (StatusCode::OK, "ready").into_response(),
+                Err(err) => (StatusCode::SERVICE_UNAVAILABLE, format!("upstream not reachable: {err}")).into_response(),
+            };
+        }
+        _ => {}
+    }
     if method == "POST" {
         if let Some(repo) = tree_batch_req(&path_q) {
             if let Some(r) = tree_batch(e, &repo, &path_q, &h, &body) {
@@ -295,7 +317,41 @@ fn handle_get(e: &Edge, method: String, path_q: String, h: HeaderMap, body: Byte
     }
 }
 
-fn app_tier(upstream: String, cache_dir: String, tier: &'static str) -> Router {
+/// Keep the cache under `cap` bytes: when it is over, remove the oldest objects
+/// (by the time they were cached) until it is under 90% of the cap.
+fn evict(dirs: &[std::path::PathBuf], cap: u64) -> (u64, usize) {
+    let mut files = vec![];
+    let mut walk = dirs.to_vec();
+    while let Some(d) = walk.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        for f in rd.flatten() {
+            let Ok(m) = f.metadata() else { continue };
+            if m.is_dir() {
+                walk.push(f.path());
+            } else {
+                files.push((m.modified().unwrap_or(std::time::UNIX_EPOCH), m.len(), f.path()));
+            }
+        }
+    }
+    let mut total: u64 = files.iter().map(|f| f.1).sum();
+    if total <= cap {
+        return (total, 0);
+    }
+    files.sort();
+    let (target, mut removed) = (cap / 10 * 9, 0);
+    for (_, len, path) in files {
+        if total <= target {
+            break;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            total -= len;
+            removed += 1;
+        }
+    }
+    (total, removed)
+}
+
+fn app_tier_with(upstream: String, cache_dir: String, tier: &'static str) -> (Router, Arc<Edge>) {
     let agent = ureq::AgentBuilder::new().redirects(0).timeout(std::time::Duration::from_secs(300)).build();
     let trees = std::path::PathBuf::from(format!("{cache_dir}-trees"));
     std::fs::create_dir_all(&trees).expect("tree cache dir");
@@ -303,13 +359,26 @@ fn app_tier(upstream: String, cache_dir: String, tier: &'static str) -> Router {
     let e = Arc::new(Edge {
         upstream: upstream.trim_end_matches('/').to_string(),
         agent,
-        store: FsBlobStore::new(cache_dir).expect("edge cache dir"),
+        store: FsBlobStore::new(&cache_dir).expect("edge cache dir"),
         trees,
         authz: Default::default(),
         authz_ttl: std::time::Duration::from_secs(ttl),
         tier,
+        draining: Default::default(),
     });
-    Router::new().fallback(move |req: Request| {
+    let cap_mb: u64 = std::env::var("CAMBIUM_EDGE_CACHE_MB").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    if cap_mb > 0 {
+        let dirs = vec![std::path::PathBuf::from(&cache_dir), e.trees.clone()];
+        std::thread::spawn(move || loop {
+            let (bytes, removed) = evict(&dirs, cap_mb * 1024 * 1024);
+            if removed > 0 {
+                cambium_core::log::info("cache trimmed", serde_json::json!({"removed": removed, "bytes": bytes, "cap_mb": cap_mb}));
+            }
+            std::thread::sleep(std::time::Duration::from_secs(30));
+        });
+    }
+    let e2 = e.clone();
+    let router = Router::new().fallback(move |req: Request| {
         let e = e.clone();
         async move {
             let (parts, body) = req.into_parts();
@@ -322,7 +391,8 @@ fn app_tier(upstream: String, cache_dir: String, tier: &'static str) -> Router {
                 .await
                 .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "edge worker failed").into_response())
         }
-    })
+    });
+    (router, e2)
 }
 
 /// `cmbd edge` (regional tier) or `cmbd daemon` (per-machine tier): same code, the
@@ -341,6 +411,61 @@ pub fn run(tier: &'static str) {
             &format!("cmbd {tier} listening"),
             serde_json::json!({"addr": addr.to_string(), "upstream": upstream.to_string(), "cache": dir.to_string()}),
         );
-        axum::serve(l, app_tier(upstream, dir, tier)).await.unwrap();
+        let (app, e) = app_tier_with(upstream, dir, tier);
+        let drain =
+            std::time::Duration::from_secs(std::env::var("CAMBIUM_SHUTDOWN_DRAIN_S").ok().and_then(|v| v.parse().ok()).unwrap_or(5));
+        axum::serve(l, app)
+            .with_graceful_shutdown(async move {
+                crate::shutdown_signal().await;
+                // fail /readyz first so the Service stops sending new requests here
+                e.draining.store(true, std::sync::atomic::Ordering::Relaxed);
+                cambium_core::log::info(
+                    &format!("cmbd {tier}: shutdown requested; draining"),
+                    serde_json::json!({"drain_s": drain.as_secs()}),
+                );
+                tokio::time::sleep(drain).await;
+            })
+            .await
+            .unwrap();
+        cambium_core::log::info(&format!("cmbd {tier} stopped cleanly"), serde_json::json!({}));
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tower::ServiceExt;
+
+    #[test]
+    fn eviction_removes_oldest_until_under_the_cap() {
+        let d = tempfile::tempdir().unwrap();
+        let sub = d.path().join("ab");
+        std::fs::create_dir_all(&sub).unwrap();
+        let t0 = std::time::SystemTime::now() - std::time::Duration::from_secs(1000);
+        for i in 0..10u64 {
+            let f = sub.join(format!("f{i}"));
+            std::fs::write(&f, vec![0u8; 1000]).unwrap();
+            std::fs::File::options().write(true).open(&f).unwrap().set_modified(t0 + std::time::Duration::from_secs(i)).unwrap();
+        }
+        assert_eq!(evict(&[d.path().to_path_buf()], 20_000), (10_000, 0), "under the cap: nothing removed");
+        let (bytes, removed) = evict(&[d.path().to_path_buf()], 5_000);
+        assert_eq!((bytes, removed), (4_000, 6), "down to 90% of the cap");
+        for i in 0..6 {
+            assert!(!sub.join(format!("f{i}")).exists(), "oldest removed first");
+        }
+        assert!(sub.join("f9").exists());
+    }
+
+    #[tokio::test]
+    async fn health_is_local_and_readiness_follows_the_upstream() {
+        let d = tempfile::tempdir().unwrap();
+        // nothing listens on this port: the upstream is down
+        let (app, e) = app_tier_with("http://127.0.0.1:9".into(), d.path().join("c").to_string_lossy().into(), "edge");
+        let get = |p: &str| axum::http::Request::get(p).body(axum::body::Body::empty()).unwrap();
+        assert_eq!(app.clone().oneshot(get("/healthz")).await.unwrap().status(), StatusCode::OK);
+        assert_eq!(app.clone().oneshot(get("/readyz")).await.unwrap().status(), StatusCode::SERVICE_UNAVAILABLE);
+        e.draining.store(true, std::sync::atomic::Ordering::Relaxed);
+        let r = app.oneshot(get("/readyz")).await.unwrap();
+        assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
 }

@@ -26,53 +26,27 @@ pub fn carry_blame(old: &str, old_blame: &[String], new: &str, cs: &str) -> Vec<
     out
 }
 
-/// Line-level three-way merge. Returns Err(()) on overlapping edits.
+/// Line-level three-way merge. Returns Err(()) when both sides changed the same or
+/// adjacent lines differently; identical edits on both sides are taken once.
 #[allow(clippy::result_unit_err)] // the only failure is "no answer"; callers map it to 416 / conflict
 pub fn merge3(base: &str, ours: &str, theirs: &str) -> Result<String, ()> {
-    if ours == theirs || theirs == base {
-        return Ok(ours.to_string());
+    match merge3_marked(base, ours, theirs, "", "") {
+        (m, 0) => Ok(m),
+        _ => Err(()),
     }
-    if ours == base {
-        return Ok(theirs.to_string());
-    }
-    let b: Vec<&str> = base.split_inclusive('\n').collect();
-    let hunks_o = hunks(base, ours);
-    let hunks_t = hunks(base, theirs);
-    // overlap check (touching hunks count as conflicts)
-    for a in &hunks_o {
-        for c in &hunks_t {
-            if a.0 <= c.1 && c.0 <= a.1 {
-                if a == c {
-                    continue;
-                }
-                return Err(());
-            }
-        }
-    }
-    let mut all: Vec<_> = hunks_o.into_iter().chain(hunks_t).collect();
-    all.sort_by_key(|h| (h.0, h.1));
-    all.dedup();
-    let mut out = String::new();
-    let mut pos = 0;
-    for (s, e, repl) in all {
-        for l in &b[pos..s] {
-            out.push_str(l);
-        }
-        out.push_str(&repl);
-        pos = e;
-    }
-    for l in &b[pos..] {
-        out.push_str(l);
-    }
-    Ok(out)
 }
 
 /// Three-way merge that always gives an answer: edits that overlap become conflict
 /// blocks marked the way git marks them (`<<<<<<<`, `=======`, `>>>>>>>`), so a person
 /// can resolve them in an editor. Returns the text and the number of conflict blocks.
+/// `merge3` is this with "any conflict" as failure, so landing on the server and
+/// `cmb sync` always agree on what conflicts.
 pub fn merge3_marked(base: &str, ours: &str, theirs: &str, ours_label: &str, theirs_label: &str) -> (String, usize) {
-    if let Ok(m) = merge3(base, ours, theirs) {
-        return (m, 0);
+    if ours == theirs || theirs == base {
+        return (ours.to_string(), 0);
+    }
+    if ours == base {
+        return (theirs.to_string(), 0);
     }
     let b: Vec<&str> = base.split_inclusive('\n').collect();
     let mut all: Vec<(usize, usize, String, bool)> = hunks(base, ours)
@@ -83,7 +57,8 @@ pub fn merge3_marked(base: &str, ours: &str, theirs: &str, ours_label: &str, the
     all.sort_by_key(|h| (h.0, h.1));
     let (mut out, mut pos, mut n, mut i) = (String::new(), 0, 0, 0);
     while i < all.len() {
-        // one cluster: hunks that overlap or touch (the same rule `merge3` uses)
+        // one cluster: hunks that overlap or touch; within it, identical results from
+        // both sides merge cleanly, different ones conflict
         let (s, mut e) = (all[i].0, all[i].1);
         let mut j = i + 1;
         while j < all.len() && all[j].0 <= e {
